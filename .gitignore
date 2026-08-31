@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+logs/*
+!logs/.gitignore
+snapshots/*
+!snapshots/.gitignore
+*.avhdx
+*.db
+.venv/
+.pytest_cache/

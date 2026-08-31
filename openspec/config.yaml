@@ -1,0 +1,37 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Python 3.13.7, pytest 9.0.3, ruff 0.16.0
+  Architecture: Malware-analysis sandbox with Hypervisor-backed Bunker isolation
+  Testing: 144 tests across 4 files (functionality, security, integration, real integration)
+  Platform: Windows (Hyper-V), PowerShell 5.1 shell
+  Modules: types, exceptions, hypervisor, layers, monitoring, bunker, manager, cli, __main__
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Consider Hyper-V VM lifecycle implications
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Security scenarios MUST cover escape-resistance and decontamination
+  design:
+    - Include sequence diagrams for bunker lifecycle flows
+    - Document security layer isolation decisions
+    - Reference Hyper-V PowerShell cmdlets where applicable
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Tag tasks by affected module (hypervisor, bunker, layers, etc.)
+  apply:
+    guidelines:
+      - Follow existing code patterns in lumenos_sandbox/
+      - Security-sensitive changes require sentinel review
+    tdd: true
+    test_command: "py -3 -m pytest tests/ -v"
+  verify:
+    test_command: "py -3 -m pytest tests/ -v"
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas

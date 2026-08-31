@@ -1,0 +1,18 @@
+# LUMENOS SANDBOX ARCHITECTURE - Dependencias
+# Autor: Irvin Diaz Medorio
+# Versión: 1.0.0
+#
+# Este sistema utiliza únicamente la biblioteca estándar de Python
+# para máxima portabilidad y seguridad.
+
+# Dependencias opcionales para desarrollo y pruebas
+# Descomentar si se desea usar pytest
+
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Dependencias opcionales para análisis avanzado
+# Descomentar según necesidades
+
+psutil>=5.9.0        # Monitoreo de procesos
+cryptography>=40.0.0  # Operaciones criptográficas avanzadas
