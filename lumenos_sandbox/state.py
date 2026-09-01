@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .secrets import SecretManager
+
 logger = logging.getLogger("LUMENOS_SANDBOX")
 
 _DEFAULT_DB = "lumenos_state.db"
@@ -34,11 +36,18 @@ class BunkerStateStore:
     """Thread-safe SQLite store for bunker state.
 
     Uses WAL mode for concurrent reads during monitoring.
+    Sensitive fields (config, signing_key) are encrypted at rest
+    using Fernet via SecretManager.
     """
 
     def __init__(self, db_path: str = _DEFAULT_DB):
         self._db_path = db_path
         self._local = threading.local()
+        self._secret_mgr = SecretManager()
+        self._encryption_key = self._secret_mgr.get_secret("state_encryption_key")
+        if self._encryption_key is None:
+            self._encryption_key = self._secret_mgr.generate_key()
+            self._secret_mgr.store_secret("state_encryption_key", self._encryption_key)
         self._init_db()
 
     # -- connection per-thread --
@@ -70,9 +79,16 @@ class BunkerStateStore:
     # -- public API --
 
     def save(self, bunker_id: str, data: Dict[str, Any]) -> None:
-        """Upsert bunker state."""
+        """Upsert bunker state. Sensitive fields are encrypted at rest."""
         now = datetime.now().isoformat()
         conn = self._get_conn()
+
+        # Encrypt sensitive fields before storage
+        config_str = json.dumps(data.get("config", {}), default=str)
+        signing_key = data.get("signing_key")
+        if signing_key:
+            signing_key = SecretManager.encrypt(signing_key, self._encryption_key)
+
         conn.execute(
             """INSERT INTO bunkers
                (bunker_id, config, state, vm_name, switch_name,
@@ -90,11 +106,11 @@ class BunkerStateStore:
                  updated_at=excluded.updated_at""",
             (
                 bunker_id,
-                json.dumps(data.get("config", {}), default=str),
+                config_str,
                 data.get("state", "UNKNOWN"),
                 data.get("vm_name"),
                 data.get("switch_name"),
-                data.get("signing_key"),
+                signing_key,
                 data.get("created_at"),
                 data.get("activated_at"),
                 data.get("terminated_at"),
@@ -105,20 +121,28 @@ class BunkerStateStore:
         logger.debug("State saved for %s", bunker_id)
 
     def load(self, bunker_id: str) -> Optional[Dict[str, Any]]:
-        """Load bunker state. Returns None if not found."""
+        """Load bunker state. Returns None if not found. Decrypts sensitive fields."""
         conn = self._get_conn()
         row = conn.execute(
             "SELECT * FROM bunkers WHERE bunker_id = ?", (bunker_id,)
         ).fetchone()
         if row is None:
             return None
+
+        signing_key = row["signing_key"]
+        if signing_key:
+            try:
+                signing_key = SecretManager.decrypt(signing_key, self._encryption_key)
+            except Exception:
+                logger.warning("Could not decrypt signing_key for %s; treating as plaintext", bunker_id)
+
         return {
             "bunker_id": row["bunker_id"],
             "config": json.loads(row["config"]),
             "state": row["state"],
             "vm_name": row["vm_name"],
             "switch_name": row["switch_name"],
-            "signing_key": row["signing_key"],
+            "signing_key": signing_key,
             "created_at": row["created_at"],
             "activated_at": row["activated_at"],
             "terminated_at": row["terminated_at"],

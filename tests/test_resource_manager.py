@@ -1,5 +1,6 @@
 """Unit tests for resource_manager — RAM/CPU/GPU allocation and efficiency."""
 
+import json
 from unittest.mock import patch, MagicMock
 
 import pytest

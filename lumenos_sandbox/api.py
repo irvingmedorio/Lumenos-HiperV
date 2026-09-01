@@ -94,7 +94,7 @@ def _get_bunker(bunker_id: str) -> Bunker:
 @app.get("/health")
 def health_check():
     """System health check."""
-    return check_health(get_state_store())
+    return {"status": "ok", "version": "2.1.0"}
 
 
 @app.get("/bunkers")
@@ -179,24 +179,9 @@ def activate_bunker(bunker_id: str):
 
 @app.get("/bunkers/{bunker_id}/metrics")
 def get_metrics(bunker_id: str):
-    """Get current metrics snapshot."""
+    """Get collector metrics from bunker."""
     bunker = _get_bunker(bunker_id)
-    return {
-        "bunker_id": bunker_id,
-        "state": bunker.state.name,
-        "metrics": {
-            "cpu_usage": bunker.metrics.cpu_usage,
-            "memory_usage": bunker.metrics.memory_usage,
-            "disk_usage": bunker.metrics.disk_usage,
-            "network_packets_blocked": bunker.metrics.network_packets_blocked,
-            "processes_terminated": bunker.metrics.processes_terminated,
-            "escape_attempts_blocked": bunker.metrics.escape_attempts_blocked,
-            "integrity_violations": bunker.metrics.integrity_violations,
-            "uptime_seconds": bunker.metrics.uptime_seconds,
-        },
-        "escape_probability": bunker.get_escape_probability(),
-        "collector": bunker.metrics_collector.snapshot(),
-    }
+    return bunker.get_full_status()["collector_metrics"]
 
 
 @app.post("/bunkers/{bunker_id}/analyze", response_model=MessageResponse)

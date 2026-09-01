@@ -116,6 +116,7 @@ class Bunker:
             bunker.terminated_at = datetime.fromisoformat(data["terminated_at"])
         if data.get("signing_key"):
             bunker._signing_key = data["signing_key"]
+        bunker._secret_mgr = SecretManager()
         return bunker
 
     def transition_to(self, new_state: BunkerState) -> bool:
@@ -486,18 +487,24 @@ class Bunker:
                 _component_baseline_digest(component)
             )
 
+    def _get_guest_password(self) -> str:
+        """Retrieve guest password from Windows Credential Manager."""
+        cred_name = f"bunker_{self.config.id}_guest_password"
+        return self._secret_mgr.get_secret(cred_name) or ""
+
     def _propagate_vm_credentials(self):
         """Set VM name and guest credentials on all security layers and the monitor."""
+        guest_password = self._get_guest_password()
         for layer in self.security_layers.values():
             layer.set_vm_credentials(
                 self._vm_name or "",
                 self.config.guest_username,
-                self.config.guest_password,
+                guest_password,
             )
         self.security_monitor.set_vm_credentials(
             self._vm_name or "",
             self.config.guest_username,
-            self.config.guest_password,
+            guest_password,
         )
 
     # --- Private activation helpers ---
@@ -573,7 +580,7 @@ class Bunker:
                 events = read_guest_event_log(
                     self._vm_name,
                     self.config.guest_username,
-                    self.config.guest_password,
+                    self._get_guest_password(),
                     log_name="Security",
                     max_events=50,
                 )
