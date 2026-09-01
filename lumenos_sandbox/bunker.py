@@ -27,6 +27,7 @@ from .layers import (
     ProcessSecurityLayer, MemorySecurityLayer, HypervisorSecurityLayer,
 )
 from .state import BunkerStateStore
+from .secrets import SecretManager
 from .observability import MetricsCollector
 
 logger = logging.getLogger('LUMENOS_SANDBOX')
@@ -88,6 +89,13 @@ class Bunker:
 
         # Per-bunker HMAC signing key for tamper-evident reports
         self._signing_key: str = secrets.token_hex(32)
+
+        # Secrets management — store guest password in Credential Manager
+        self._secret_mgr = SecretManager()
+        if self.config.guest_password:
+            cred_name = f"bunker_{self.config.id}_guest_password"
+            self._secret_mgr.store_secret(cred_name, self.config.guest_password)
+            self.config.guest_password = ""  # clear plaintext from config
 
     @classmethod
     def load_from_store(cls, bunker_id: str) -> Optional["Bunker"]:

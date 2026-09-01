@@ -56,6 +56,12 @@ def main():
     evidence_parser.add_argument("--id", required=True, help="ID del sandbox")
     evidence_parser.add_argument("--output", default="evidence", help="Directorio de salida (default: evidence)")
 
+    # lumenos-sandbox api [--host 127.0.0.1] [--port 8000] [--reload]
+    api_parser = subparsers.add_parser("api", help="Start REST API server (FastAPI + uvicorn)")
+    api_parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    api_parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
+    api_parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -79,6 +85,7 @@ def main():
         "migrate": cmd_migrate,
         "compliance": cmd_compliance,
         "evidence": cmd_evidence,
+        "api": cmd_api,
     }
 
     try:
@@ -265,4 +272,12 @@ def cmd_evidence(args):
     print(f"Evidence exported: {out_path}")
     print(f"  Items: {len(chain.items)}")
     print(f"  Chain valid: {chain.verify()}")
+    return 0
+
+
+def cmd_api(args):
+    from .api import run_api
+
+    print(f"Starting LUMENOS Sandbox API on {args.host}:{args.port}...")
+    run_api(host=args.host, port=args.port, reload=args.reload)
     return 0
