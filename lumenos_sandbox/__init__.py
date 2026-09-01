@@ -70,6 +70,10 @@ from .compliance import Control, AuditLog, ComplianceReport, ControlStatus
 from .resource_manager import ResourceManager, ResourceProfile, VMResourceAlloc, HostResources
 from .gpu import GPUPassthrough, GPUDevice, GPUVendor
 from .image_builder import ImageBuilder, VMImage, ImageLayer, ImageType, ImageStatus
+from .package_engine import PackageEngine, PackageManifest, PackageLayer, PackageFlag
+from .analysis_agent import AnalysisAgent, AnalysisReport, AgentStatus, MonitorType
+from .multi_host import MultiHostManager, HostNode, HostRole, HostStatus, ClusterConfig
+from .phone_support import PhoneSupport, DeviceCapabilities, PhoneVMConfig, DevicePlatform, HypervisorType
 
 __all__ = [
     # Enumerations
@@ -134,6 +138,28 @@ __all__ = [
     "ImageLayer",
     "ImageType",
     "ImageStatus",
+    # Package Engine
+    "PackageEngine",
+    "PackageManifest",
+    "PackageLayer",
+    "PackageFlag",
+    # Analysis Agent
+    "AnalysisAgent",
+    "AnalysisReport",
+    "AgentStatus",
+    "MonitorType",
+    # Multi-Host
+    "MultiHostManager",
+    "HostNode",
+    "HostRole",
+    "HostStatus",
+    "ClusterConfig",
+    # Phone Support
+    "PhoneSupport",
+    "DeviceCapabilities",
+    "PhoneVMConfig",
+    "DevicePlatform",
+    "HypervisorType",
     # Helpers
     "_component_baseline_digest",
 ]
