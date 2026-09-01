@@ -249,14 +249,9 @@ class PackageEngine:
 
         try:
             with open(package_path, "rb") as f:
-                f.read(HEADER_SIZE)
-                manifest_len = struct.unpack("<I", f.read(4))[0]
-                f.read(manifest_len - 4)  # Skip already-read bytes
-                manifest_data = f.read(manifest_len)
-                # Re-read properly
-                f.seek(HEADER_SIZE)
-                ml = struct.unpack("<I", f.read(4))[0]
-                manifest_bytes = f.read(ml)
+                header = f.read(HEADER_SIZE)
+                manifest_len = struct.unpack("<I", header[8:12])[0]
+                manifest_bytes = f.read(manifest_len)
                 manifest_dict = json.loads(manifest_bytes)
 
             # Extract and deploy

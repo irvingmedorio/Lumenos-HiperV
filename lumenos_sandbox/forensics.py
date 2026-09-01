@@ -46,11 +46,25 @@ class EvidenceChain:
         logger.info("Evidence added: %s (%s)", item.evidence_id, item.source)
 
     def verify(self) -> bool:
-        """Verify all item hashes match their SHA-256."""
+        """Verify all item hashes match their SHA-256.
+
+        If the item metadata contains a ``path`` entry pointing to an existing
+        file, the actual file bytes are hashed.  Otherwise the metadata string
+        ``evidence_id:description:source`` is hashed (backward-compatible
+        fallback for items collected without a file reference).
+        """
         for item in self.items:
-            # Re-hash the evidence_id + description as a minimal integrity check
-            payload = f"{item.evidence_id}:{item.description}:{item.source}".encode()
-            expected = hashlib.sha256(payload).hexdigest()
+            file_path = item.metadata.get("path")
+            if file_path:
+                path = Path(file_path)
+                if path.is_file():
+                    expected = _hash_file(path)
+                else:
+                    logger.error("Evidence file missing: %s (%s)", item.evidence_id, file_path)
+                    return False
+            else:
+                payload = f"{item.evidence_id}:{item.description}:{item.source}".encode()
+                expected = hashlib.sha256(payload).hexdigest()
             if expected != item.sha256:
                 logger.error("Evidence tampered: %s", item.evidence_id)
                 return False

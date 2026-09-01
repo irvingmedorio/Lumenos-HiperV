@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lumenos_sandbox.forensics import (
-    EvidenceItem, EvidenceChain, collect_evidence, export_evidence,
+    EvidenceItem, EvidenceChain, collect_evidence, export_evidence, _hash_file,
 )
 
 
