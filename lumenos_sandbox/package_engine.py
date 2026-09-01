@@ -218,12 +218,12 @@ class PackageEngine:
                     return {"valid": False, "error": "Invalid magic bytes"}
 
                 # Read manifest
-                manifest_len = struct.unpack("<I", header[12:16])[0]
+                manifest_len = struct.unpack("<I", header[8:12])[0]
                 manifest_data = f.read(manifest_len)
                 manifest_dict = json.loads(manifest_data)
 
                 # Verify checksum
-                expected_checksum = header[16:48]
+                expected_checksum = header[12:44]
                 content = f.read()
                 actual_checksum = hashlib.sha256(manifest_data + content).digest()
 
