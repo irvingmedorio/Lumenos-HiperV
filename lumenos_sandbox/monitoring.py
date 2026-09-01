@@ -13,6 +13,7 @@ from .types import (
     SecurityLayer, ThreatLevel, SecurityEvent, IntegrityCheck,
     EscapeAttemptType,
 )
+from .observability import MetricsCollector
 
 logger = logging.getLogger('LUMENOS_SANDBOX')
 
@@ -149,19 +150,33 @@ class SecurityMonitor:
         ]
     }
 
-    def __init__(self, bunker_id: str):
+    def __init__(self, bunker_id: str, *, metrics=None):
         self.bunker_id = bunker_id
         self.events: List[SecurityEvent] = []
         self.escape_attempts: List[EscapeAttemptType] = []
         self._lock = threading.Lock()
         self._monitoring_active = False
         self._monitor_thread: Optional[threading.Thread] = None
+        self._metrics = metrics  # MetricsCollector or None
+        # VM credentials for hypervisor queries (set via set_vm_credentials)
+        self._vm_name: Optional[str] = None
+        self._username: str = ""
+        self._password: str = ""
+
+    def set_vm_credentials(self, vm_name: str, username: str = "",
+                           password: str = ""):
+        """Set VM name and guest credentials for hypervisor monitoring calls."""
+        self._vm_name = vm_name
+        self._username = username
+        self._password = password
 
     def start_monitoring(self):
         """Inicia el monitoreo continuo."""
         self._monitoring_active = True
         self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._monitor_thread.start()
+        if self._metrics is not None:
+            self._metrics.inc("monitoring_started")
         logger.info(f"Monitoreo de seguridad iniciado para bunker {self.bunker_id}")
 
     def stop_monitoring(self):
@@ -169,6 +184,8 @@ class SecurityMonitor:
         self._monitoring_active = False
         if self._monitor_thread:
             self._monitor_thread.join(timeout=5)
+        if self._metrics is not None:
+            self._metrics.inc("monitoring_stopped")
         logger.info(f"Monitoreo de seguridad detenido para bunker {self.bunker_id}")
 
     def _monitor_loop(self):
@@ -184,25 +201,135 @@ class SecurityMonitor:
                 logger.error(f"Error en monitoreo: {e}")
 
     def _check_system_integrity(self):
-        """Verifica integridad del sistema."""
-        pass
+        """Verifica integridad del sistema leyendo event log del guest."""
+        if not self._vm_name:
+            return
+
+        try:
+            from .hypervisor import read_guest_event_log
+            events = read_guest_event_log(
+                self._vm_name, self._username, self._password,
+                log_name="Security", max_events=20,
+            )
+            if not events:
+                return
+
+            findings = self.analyze_event_log(events)
+            for finding in findings:
+                event = SecurityEvent(
+                    timestamp=datetime.now(),
+                    layer=SecurityLayer.HYPERVISOR,
+                    event_type="INTEGRITY_FINDING",
+                    severity=ThreatLevel.HIGH,
+                    description=finding,
+                    bunker_id=self.bunker_id,
+                    raw_data={"source": "event_log"},
+                )
+                self.log_event(event)
+        except Exception as e:
+            logger.debug("System integrity check failed: %s", e)
 
     def _check_network_activity(self):
-        """Verifica actividad de red sospechosa."""
-        pass
+        """Verifica actividad de red sospechosa (aislamiento del guest)."""
+        if not self._vm_name:
+            return
+
+        try:
+            from .hypervisor import test_guest_connectivity
+            # test_guest_connectivity returns True if BLOCKED (good)
+            is_blocked = test_guest_connectivity(
+                self._vm_name, self._username, self._password,
+            )
+            if not is_blocked:
+                event = SecurityEvent(
+                    timestamp=datetime.now(),
+                    layer=SecurityLayer.NETWORK,
+                    event_type="ISOLATION_BREACH",
+                    severity=ThreatLevel.CRITICAL,
+                    description="Guest can reach external network — isolation broken",
+                    bunker_id=self.bunker_id,
+                )
+                self.log_event(event)
+        except Exception as e:
+            logger.debug("Network activity check failed: %s", e)
 
     def _check_process_activity(self):
-        """Verifica actividad de procesos sospechosos."""
-        pass
+        """Verifica actividad de procesos sospechosos en el guest."""
+        if not self._vm_name:
+            return
+
+        try:
+            from .hypervisor import get_guest_processes
+            processes = get_guest_processes(
+                self._vm_name, self._username, self._password,
+            )
+            if not processes:
+                return
+
+            # Scan process list for suspicious names
+            suspicious_names = {
+                "mimikatz", "procdump", "psexec", "nc", "ncat",
+                "netcat", "meterpreter", "cobaltstrike", "inject",
+            }
+            for proc in processes:
+                name = (proc.get("ProcessName") or "").lower()
+                if any(s in name for s in suspicious_names):
+                    event = SecurityEvent(
+                        timestamp=datetime.now(),
+                        layer=SecurityLayer.PROCESS,
+                        event_type="SUSPICIOUS_PROCESS",
+                        severity=ThreatLevel.HIGH,
+                        description=f"Suspicious process detected: {name}",
+                        bunker_id=self.bunker_id,
+                        raw_data={"pid": proc.get("Id"), "process": name},
+                    )
+                    self.log_event(event)
+        except Exception as e:
+            logger.debug("Process activity check failed: %s", e)
 
     def _check_memory_integrity(self):
-        """Verifica integridad de memoria."""
-        pass
+        """Verifica integridad de memoria (VBS/HVCI status) en el guest."""
+        if not self._vm_name:
+            return
+
+        try:
+            from .hypervisor import check_guest_vbs_status
+            vbs = check_guest_vbs_status(
+                self._vm_name, self._username, self._password,
+            )
+            if not vbs.get("vbs_enabled"):
+                event = SecurityEvent(
+                    timestamp=datetime.now(),
+                    layer=SecurityLayer.MEMORY,
+                    event_type="VBS_DISABLED",
+                    severity=ThreatLevel.MEDIUM,
+                    description="Virtualization-Based Security is disabled in guest",
+                    bunker_id=self.bunker_id,
+                    raw_data=vbs,
+                )
+                self.log_event(event)
+            if not vbs.get("secure_boot"):
+                event = SecurityEvent(
+                    timestamp=datetime.now(),
+                    layer=SecurityLayer.MEMORY,
+                    event_type="SECURE_BOOT_DISABLED",
+                    severity=ThreatLevel.MEDIUM,
+                    description="Secure Boot is disabled in guest",
+                    bunker_id=self.bunker_id,
+                    raw_data=vbs,
+                )
+                self.log_event(event)
+        except Exception as e:
+            logger.debug("Memory integrity check failed: %s", e)
 
     def log_event(self, event: SecurityEvent):
         """Registra un evento de seguridad."""
         with self._lock:
             self.events.append(event)
+
+        if self._metrics is not None:
+            self._metrics.inc(f"security_events_{event.severity.name}")
+            self._metrics.inc("security_events_total")
 
         # Log según severidad
         if event.severity == ThreatLevel.CRITICAL:
@@ -233,6 +360,9 @@ class SecurityMonitor:
         )
         self.log_event(event)
 
+        if self._metrics is not None:
+            self._metrics.inc(f"escape_attempts_{attempt_type.value}")
+
         return True
 
     def _get_layer_for_escape_type(self, attempt_type: EscapeAttemptType) -> SecurityLayer:
@@ -258,13 +388,18 @@ class SecurityMonitor:
                     1 for e in self.events if e.severity == level
                 )
 
-            return {
+            result = {
                 "bunker_id": self.bunker_id,
                 "total_events": len(self.events),
                 "escape_attempts": len(self.escape_attempts),
                 "events_by_severity": events_by_severity,
                 "last_event": self.events[-1].timestamp.isoformat() if self.events else None,
             }
+
+        if self._metrics is not None:
+            result["collector_metrics"] = self._metrics.snapshot()
+
+        return result
 
     def analyze_patterns(self, data: str) -> List[str]:
         """Analiza datos en busca de patrones sospechosos."""

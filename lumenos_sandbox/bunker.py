@@ -27,6 +27,7 @@ from .layers import (
     ProcessSecurityLayer, MemorySecurityLayer, HypervisorSecurityLayer,
 )
 from .state import BunkerStateStore
+from .observability import MetricsCollector
 
 logger = logging.getLogger('LUMENOS_SANDBOX')
 
@@ -66,9 +67,12 @@ class Bunker:
         self._vm_name: Optional[str] = None
         self._switch_name: Optional[str] = None
 
+        # Observability
+        self.metrics_collector = MetricsCollector()
+
         # Componentes de seguridad
         self.integrity_verifier = IntegrityVerifier()
-        self.security_monitor = SecurityMonitor(config.id)
+        self.security_monitor = SecurityMonitor(config.id, metrics=self.metrics_collector)
 
         # Capas de seguridad
         self.security_layers: Dict[SecurityLayer, SecurityLayerBase] = {
@@ -119,6 +123,8 @@ class Bunker:
 
             old_state = self.state
             self.state = new_state
+            self.metrics_collector.inc(f"transition_{new_state.name}")
+            self.metrics_collector.set_gauge("current_state", new_state.value)
             logger.info(f"Bunker {self.config.id}: {old_state.name} -> {new_state.name}")
             self._persist_state()
             return True
@@ -170,8 +176,27 @@ class Bunker:
 
         except Exception as e:
             logger.error(f"Error inicializando bunker: {e}")
+            self._cleanup_on_failure()
             self.transition_to(BunkerState.ERROR)
             return False
+
+    def _cleanup_on_failure(self):
+        """Remove Hyper-V resources created during a failed initialize()."""
+        from .hypervisor import remove_vm, remove_switch
+        if self._vm_name:
+            try:
+                remove_vm(self._vm_name, force=True)
+                logger.info("Cleaned up VM %s after init failure", self._vm_name)
+            except Exception as exc:
+                logger.warning("Failed to clean up VM %s: %s", self._vm_name, exc)
+            self._vm_name = None
+        if self._switch_name:
+            try:
+                remove_switch(self._switch_name)
+                logger.info("Cleaned up switch %s after init failure", self._switch_name)
+            except Exception as exc:
+                logger.warning("Failed to clean up switch %s: %s", self._switch_name, exc)
+            self._switch_name = None
 
     def activate(self) -> bool:
         """Activa el bunker para pruebas."""
@@ -190,6 +215,7 @@ class Bunker:
                         prev_layer.deactivate()
                     raise SecurityViolation(f"Fallo activando capa {layer_type.value}")
                 activated_layers.append(layer)
+                self.metrics_collector.inc(f"layer_{layer_type.value}_activated")
                 logger.info(f"Capa {layer_type.value} activada")
 
             self.security_monitor.start_monitoring()
@@ -223,6 +249,7 @@ class Bunker:
             for layer in self.security_layers.values():
                 if layer.active:
                     layer.deactivate()
+                    self.metrics_collector.inc("layer_deactivated")
 
             # Capturar snapshot forense
             self._capture_forensic_snapshot()
@@ -364,6 +391,7 @@ class Bunker:
                 bunker_id=self.config.id,
             )
             self.security_monitor.log_event(event)
+            self.metrics_collector.inc("forced_quarantines")
 
         except Exception as e:
             logger.error(f"Error en cuarentena forzada: {e}")
@@ -406,6 +434,7 @@ class Bunker:
             },
             "security_report": self.security_monitor.get_security_report(),
             "integrity_report": self.integrity_verifier.get_verification_report(),
+            "collector_metrics": self.metrics_collector.snapshot(),
         }
 
     # --- Private initialisation helpers ---
@@ -450,13 +479,18 @@ class Bunker:
             )
 
     def _propagate_vm_credentials(self):
-        """Set VM name and guest credentials on all security layers."""
+        """Set VM name and guest credentials on all security layers and the monitor."""
         for layer in self.security_layers.values():
             layer.set_vm_credentials(
                 self._vm_name or "",
                 self.config.guest_username,
                 self.config.guest_password,
             )
+        self.security_monitor.set_vm_credentials(
+            self._vm_name or "",
+            self.config.guest_username,
+            self.config.guest_password,
+        )
 
     # --- Private activation helpers ---
 
@@ -464,6 +498,7 @@ class Bunker:
         def collect():
             while self._session_active:
                 self.metrics.uptime_seconds += 1
+                self.metrics_collector.set_gauge("uptime_seconds", self.metrics.uptime_seconds)
                 time.sleep(1)
 
         threading.Thread(target=collect, daemon=True).start()
