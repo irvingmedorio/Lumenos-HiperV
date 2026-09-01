@@ -67,6 +67,9 @@ from .state import BunkerStateStore
 from .observability import JSONFormatter, MetricsCollector, check_health
 from .forensics import EvidenceItem, EvidenceChain, collect_evidence, export_evidence
 from .compliance import Control, AuditLog, ComplianceReport, ControlStatus
+from .resource_manager import ResourceManager, ResourceProfile, VMResourceAlloc, HostResources
+from .gpu import GPUPassthrough, GPUDevice, GPUVendor
+from .image_builder import ImageBuilder, VMImage, ImageLayer, ImageType, ImageStatus
 
 __all__ = [
     # Enumerations
@@ -116,6 +119,21 @@ __all__ = [
     "AuditLog",
     "ComplianceReport",
     "ControlStatus",
+    # Resource Management
+    "ResourceManager",
+    "ResourceProfile",
+    "VMResourceAlloc",
+    "HostResources",
+    # GPU Passthrough
+    "GPUPassthrough",
+    "GPUDevice",
+    "GPUVendor",
+    # Image Builder
+    "ImageBuilder",
+    "VMImage",
+    "ImageLayer",
+    "ImageType",
+    "ImageStatus",
     # Helpers
     "_component_baseline_digest",
 ]
