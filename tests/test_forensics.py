@@ -64,6 +64,51 @@ class TestEvidenceChain(unittest.TestCase):
         self.assertTrue(chain.verify())
 
 
+class TestVerifyFileContent(unittest.TestCase):
+    """Verify() hashes actual file bytes, not synthetic strings."""
+
+    def test_verify_hashes_real_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fpath = Path(tmpdir) / "evidence.bin"
+            fpath.write_bytes(b"actual evidence content")
+            item = EvidenceItem(
+                evidence_id="e1", bunker_id="b1",
+                description="file evidence", source="file",
+                sha256=_hash_file(fpath),
+                metadata={"path": str(fpath)},
+            )
+            chain = EvidenceChain(bunker_id="b1")
+            chain.add(item)
+            self.assertTrue(chain.verify())
+
+    def test_tampered_file_fails_verify(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fpath = Path(tmpdir) / "evidence.bin"
+            fpath.write_bytes(b"original content")
+            item = EvidenceItem(
+                evidence_id="e1", bunker_id="b1",
+                description="file evidence", source="file",
+                sha256=_hash_file(fpath),
+                metadata={"path": str(fpath)},
+            )
+            chain = EvidenceChain(bunker_id="b1")
+            chain.add(item)
+            # Tamper with the file
+            fpath.write_bytes(b"TAMPERED content")
+            self.assertFalse(chain.verify())
+
+    def test_missing_file_fails_verify(self):
+        item = EvidenceItem(
+            evidence_id="e1", bunker_id="b1",
+            description="file evidence", source="file",
+            sha256="does_not_matter",
+            metadata={"path": "/nonexistent/evidence.bin"},
+        )
+        chain = EvidenceChain(bunker_id="b1")
+        chain.add(item)
+        self.assertFalse(chain.verify())
+
+
 class TestCollectEvidence(unittest.TestCase):
     def setUp(self):
         self._orig = Path.cwd()

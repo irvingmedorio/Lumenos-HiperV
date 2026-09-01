@@ -5,6 +5,7 @@ monitoring processes, files, network, and API calls in real-time.
 Communicates with the host via PowerShell Direct.
 """
 
+import base64
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -389,21 +390,41 @@ class AnalysisAgent:
 
     def _run_ps_direct(self, vm_name: str, user: str, password: str,
                        command: str) -> Optional[str]:
-        """Execute a command inside the guest via PowerShell Direct."""
+        """Execute a command inside the guest via PowerShell Direct.
+
+        Uses -EncodedCommand with Base64 so the password never appears as
+        plaintext in process command-line arguments. PowerShell string
+        escaping (' → '') prevents injection inside the script itself.
+        """
         try:
-            cred_cmd = ""
-            if password:
+            # Escape values for PowerShell single-quoted string safety
+            safe_password = password.replace("'", "''")
+            safe_user = user.replace("'", "''")
+            safe_vm = vm_name.replace("'", "''")
+
+            # Build credential setup (password stays inside the script, not the CLI)
+            if safe_password:
                 cred_cmd = (
-                    f"$pass = ConvertTo-SecureString '{password}' -AsPlainText -Force; "
-                    f"$cred = New-Object System.Management.Automation.PSCredential('{user}', $pass); "
+                    f"$pass = ConvertTo-SecureString '{safe_password}' -AsPlainText -Force; "
+                    f"$cred = New-Object System.Management.Automation.PSCredential('{safe_user}', $pass); "
                 )
             else:
-                cred_cmd = f"$cred = New-Object System.Management.Automation.PSCredential('{user}', (ConvertTo-SecureString '' -AsPlainText -Force)); "
+                cred_cmd = (
+                    f"$cred = New-Object System.Management.Automation.PSCredential("
+                    f"'{safe_user}', (ConvertTo-SecureString '' -AsPlainText -Force)); "
+                )
+
+            ps_script = (
+                f"{cred_cmd}"
+                f"Invoke-Command -VMName '{safe_vm}' "
+                f"-Credential $cred -ScriptBlock {{ {command} }}"
+            )
+
+            # Base64-encode the entire script to prevent shell-level injection
+            encoded = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
 
             r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 f'{cred_cmd}Invoke-Command -VMName "{vm_name}" '
-                 f'-Credential $cred -ScriptBlock {{ {command} }}'],
+                ["powershell", "-NoProfile", "-EncodedCommand", encoded],
                 capture_output=True, text=True, timeout=30,
             )
             return r.stdout.strip() if r.returncode == 0 else None
@@ -414,10 +435,11 @@ class AnalysisAgent:
                         remote_path: str, content: str) -> bool:
         """Write a file to the guest via PowerShell Direct."""
         try:
-            # Escape content for PowerShell
+            # Escape content for PowerShell single-quoted string safety
             escaped = content.replace("'", "''")
+            safe_path = remote_path.replace("'", "''")
             cmd = (
-                f"Set-Content -Path '{remote_path}' -Value '{escaped}' -Force"
+                f"Set-Content -Path '{safe_path}' -Value '{escaped}' -Force"
             )
             result = self._run_ps_direct(vm_name, user, password, cmd)
             return result is not None

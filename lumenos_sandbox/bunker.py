@@ -3,8 +3,10 @@
 """Bunker class — state machine and lifecycle."""
 
 import hashlib
+import hmac
 import json
 import logging
+import secrets
 import threading
 import time
 from typing import Optional, Dict, Any, List
@@ -80,6 +82,9 @@ class Bunker:
         self._lock = threading.Lock()
         self._session_active = False
 
+        # Per-bunker HMAC signing key for tamper-evident reports
+        self._signing_key: str = secrets.token_hex(32)
+
     @classmethod
     def load_from_store(cls, bunker_id: str) -> Optional["Bunker"]:
         """Restore a Bunker from persisted state. Returns None if not found."""
@@ -97,6 +102,8 @@ class Bunker:
             bunker.activated_at = datetime.fromisoformat(data["activated_at"])
         if data.get("terminated_at"):
             bunker.terminated_at = datetime.fromisoformat(data["terminated_at"])
+        if data.get("signing_key"):
+            bunker._signing_key = data["signing_key"]
         return bunker
 
     def transition_to(self, new_state: BunkerState) -> bool:
@@ -129,6 +136,7 @@ class Bunker:
                 "state": self.state.name,
                 "vm_name": self._vm_name,
                 "switch_name": self._switch_name,
+                "signing_key": self._signing_key,
                 "created_at": self.created_at.isoformat() if self.created_at else None,
                 "activated_at": self.activated_at.isoformat() if self.activated_at else None,
                 "terminated_at": self.terminated_at.isoformat() if self.terminated_at else None,
@@ -547,4 +555,13 @@ class Bunker:
 
     def _sign_report(self, report: DecontaminationReport) -> str:
         data = f"{report.bunker_id}{report.start_time}{report.end_time}{report.success}"
-        return hashlib.sha256(data.encode()).hexdigest()
+        return hmac.new(
+            bytes.fromhex(self._signing_key),
+            data.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def verify_report_signature(self, report: DecontaminationReport) -> bool:
+        """Verify a report's signature is authentic (not forged)."""
+        expected = self._sign_report(report)
+        return hmac.compare_digest(expected, report.signature)

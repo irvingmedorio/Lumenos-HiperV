@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS bunkers (
     state       TEXT NOT NULL,
     vm_name     TEXT,
     switch_name TEXT,
+    signing_key TEXT,
     created_at  TEXT,
     activated_at TEXT,
     terminated_at TEXT,
@@ -75,13 +76,14 @@ class BunkerStateStore:
         conn.execute(
             """INSERT INTO bunkers
                (bunker_id, config, state, vm_name, switch_name,
-                created_at, activated_at, terminated_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                signing_key, created_at, activated_at, terminated_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(bunker_id) DO UPDATE SET
                  config=excluded.config,
                  state=excluded.state,
                  vm_name=excluded.vm_name,
                  switch_name=excluded.switch_name,
+                 signing_key=excluded.signing_key,
                  created_at=excluded.created_at,
                  activated_at=excluded.activated_at,
                  terminated_at=excluded.terminated_at,
@@ -92,6 +94,7 @@ class BunkerStateStore:
                 data.get("state", "UNKNOWN"),
                 data.get("vm_name"),
                 data.get("switch_name"),
+                data.get("signing_key"),
                 data.get("created_at"),
                 data.get("activated_at"),
                 data.get("terminated_at"),
@@ -115,6 +118,7 @@ class BunkerStateStore:
             "state": row["state"],
             "vm_name": row["vm_name"],
             "switch_name": row["switch_name"],
+            "signing_key": row["signing_key"],
             "created_at": row["created_at"],
             "activated_at": row["activated_at"],
             "terminated_at": row["terminated_at"],
