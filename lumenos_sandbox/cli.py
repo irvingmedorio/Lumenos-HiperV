@@ -6,7 +6,26 @@ import logging
 from datetime import datetime
 
 
+def _setup_logging():
+    """Configure JSON structured logging by default."""
+    from .observability import JSONFormatter
+    import logging
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # Clear existing handlers
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(JSONFormatter())
+    root.addHandler(handler)
+
+
 def main():
+    _setup_logging()
+
     parser = argparse.ArgumentParser(
         prog="lumenos-sandbox",
         description="LUMENOS Sandbox — Aislamiento multinivel para análisis de malware"
@@ -96,7 +115,7 @@ def main():
 
 
 def cmd_status(_args=None):
-    from .hypervisor import check_hyper_v_available
+    from .hyperv_client import check_hyper_v_available
 
     hv = check_hyper_v_available()
     print(f"Hyper-V: {'[OK] Available' if hv else '[FAIL] Not available'}")

@@ -3,10 +3,18 @@
 """Enums, dataclasses, constants, and helper functions."""
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, Any, List
+from pathlib import Path
+from typing import Dict, Any, List, Union
 from datetime import datetime
+
+# tomllib is stdlib in Python 3.11+, fallback to tomli for older versions
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    import tomli as tomllib
 
 
 # ---------------------------------------------------------------------------
@@ -71,14 +79,7 @@ VALID_STATE_TRANSITIONS = {
     BunkerState.ERROR: [BunkerState.DESTROYED],
 }
 
-# Probabilidades de fallo por capa (basadas en análisis formal)
-LAYER_FAILURE_PROBABILITY = {
-    SecurityLayer.NETWORK: 1e-6,
-    SecurityLayer.FILESYSTEM: 1e-8,
-    SecurityLayer.PROCESS: 1e-5,
-    SecurityLayer.MEMORY: 1e-9,
-    SecurityLayer.HYPERVISOR: 1e-12,
-}
+
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +87,7 @@ LAYER_FAILURE_PROBABILITY = {
 # ---------------------------------------------------------------------------
 
 def _component_baseline_digest(component: str) -> str:
-    """Deterministic digest for a component while isolation layers remain simulated.
-
-    Single source of truth used by BOTH baseline initialization and current-hash
-    computation so integrity verification is always self-consistent.
-    SIMULATION-GRADE CONSISTENCY ONLY: this hashes a synthetic label, not real
-    host artifacts, until scenario B wires actual artifacts (configs, base image).
-    """
+    """Hash sintético para componentes de aislamiento."""
     return hashlib.sha512(f"lumenos-baseline:{component}".encode()).hexdigest()
 
 
@@ -119,6 +114,58 @@ class BunkerConfig:
     guest_password: str = ""
     sysmon_installed: bool = False
     sysmon_path: str = "C:\\Tools\\Sysmon64.exe"
+    monitor_interval_seconds: float = 5.0
+    failure_probabilities: Dict[SecurityLayer, float] = field(default_factory=lambda: {
+        SecurityLayer.NETWORK: 1e-6,
+        SecurityLayer.FILESYSTEM: 1e-8,
+        SecurityLayer.PROCESS: 1e-5,
+        SecurityLayer.MEMORY: 1e-9,
+        SecurityLayer.HYPERVISOR: 1e-12,
+    })
+
+    @classmethod
+    def from_file(cls, path: Union[str, Path]) -> "BunkerConfig":
+        """Load BunkerConfig from TOML or JSON file.
+        
+        Args:
+            path: Path to config file (.toml or .json)
+            
+        Returns:
+            BunkerConfig instance with loaded values
+            
+        Raises:
+            ValueError: If file format is unsupported or required fields missing
+            FileNotFoundError: If config file doesn't exist
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+        
+        suffix = path.suffix.lower()
+        if suffix == ".toml":
+            with path.open("rb") as f:
+                data = tomllib.load(f)
+        elif suffix == ".json":
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            raise ValueError(f"Unsupported config format: {suffix}. Use .toml or .json")
+        
+        # Convert failure_probabilities keys from strings to SecurityLayer enums
+        if "failure_probabilities" in data:
+            fp = data["failure_probabilities"]
+            if isinstance(fp, dict):
+                data["failure_probabilities"] = {
+                    SecurityLayer(k.lower()): v for k, v in fp.items()
+                }
+        
+        # Ensure required fields are present
+        if "id" not in data:
+            raise ValueError("Required field 'id' missing from config")
+        if "name" not in data:
+            raise ValueError("Required field 'name' missing from config")
+        
+        return cls(**data)
 
 
 @dataclass

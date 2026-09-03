@@ -29,6 +29,7 @@ from .layers import (
 from .state import BunkerStateStore
 from .secrets import SecretManager
 from .observability import MetricsCollector
+from .decontamination import DecontaminationRunner
 
 logger = logging.getLogger('LUMENOS_SANDBOX')
 
@@ -73,15 +74,18 @@ class Bunker:
 
         # Componentes de seguridad
         self.integrity_verifier = IntegrityVerifier()
-        self.security_monitor = SecurityMonitor(config.id, metrics=self.metrics_collector)
+        self.security_monitor = SecurityMonitor(
+            config.id, metrics=self.metrics_collector, monitor_interval=config.monitor_interval_seconds
+        )
 
         # Capas de seguridad
+        fp = config.failure_probabilities
         self.security_layers: Dict[SecurityLayer, SecurityLayerBase] = {
-            SecurityLayer.NETWORK: NetworkSecurityLayer(config.id),
-            SecurityLayer.FILESYSTEM: FilesystemSecurityLayer(config.id),
-            SecurityLayer.PROCESS: ProcessSecurityLayer(config.id),
-            SecurityLayer.MEMORY: MemorySecurityLayer(config.id),
-            SecurityLayer.HYPERVISOR: HypervisorSecurityLayer(config.id),
+            SecurityLayer.NETWORK: NetworkSecurityLayer(config.id, fp),
+            SecurityLayer.FILESYSTEM: FilesystemSecurityLayer(config.id, fp),
+            SecurityLayer.PROCESS: ProcessSecurityLayer(config.id, fp),
+            SecurityLayer.MEMORY: MemorySecurityLayer(config.id, fp),
+            SecurityLayer.HYPERVISOR: HypervisorSecurityLayer(config.id, fp),
         }
 
         self._lock = threading.Lock()
@@ -91,10 +95,9 @@ class Bunker:
         self._signing_key: str = secrets.token_hex(32)
 
         # Secrets management — store guest password in Credential Manager
-        self._secret_mgr = SecretManager()
+        self._secrets = SecretManager()
         if self.config.guest_password:
-            cred_name = f"bunker_{self.config.id}_guest_password"
-            self._secret_mgr.store_secret(cred_name, self.config.guest_password)
+            self._secrets.store_secret("guest_password", self.config.guest_password)
             self.config.guest_password = ""  # clear plaintext from config
 
     @classmethod
@@ -173,7 +176,7 @@ class Bunker:
 
             # Enable Guest Service Interface after VM creation
             if self._vm_name:
-                from .hypervisor import enable_guest_integration
+                from .hyperv_client import enable_guest_integration
                 enable_guest_integration(self._vm_name)
 
             # Propagate VM credentials to security layers
@@ -191,7 +194,7 @@ class Bunker:
 
     def _cleanup_on_failure(self):
         """Remove Hyper-V resources created during a failed initialize()."""
-        from .hypervisor import remove_vm, remove_switch
+        from .hyperv_client import remove_vm, remove_switch
         if self._vm_name:
             try:
                 remove_vm(self._vm_name, force=True)
@@ -274,111 +277,31 @@ class Bunker:
 
             # Iniciar descontaminación
             self.transition_to(BunkerState.DECONTAMINATING)
-            return self._decontaminate()
+
+            # Use DecontaminationRunner
+            runner = DecontaminationRunner(
+                config=self.config,
+                vm_name=self._vm_name or "",
+                guest_username=self.config.guest_username,
+                guest_password=self._get_guest_password(),
+                integrity_verifier=self.integrity_verifier,
+                security_monitor=self.security_monitor,
+                signing_key=self._signing_key,
+            )
+            report = runner.run()
+
+            # Transition based on report outcome
+            if report.success:
+                self.transition_to(BunkerState.DESTROYED)
+            else:
+                self.transition_to(BunkerState.ERROR)
+
+            return report.success
 
         except Exception as e:
             logger.error(f"Error terminando bunker: {e}")
             self.transition_to(BunkerState.ERROR)
             return False
-
-    def _decontaminate(self) -> bool:
-        """Ejecuta el proceso de descontaminación."""
-        logger.info(f"Iniciando descontaminación del bunker {self.config.id}")
-
-        report = DecontaminationReport(
-            bunker_id=self.config.id,
-            start_time=datetime.now(),
-            end_time=datetime.now(),
-            steps_completed=[],
-            steps_failed=[],
-            integrity_checks=[],
-            warnings=[],
-            success=False
-        )
-
-        steps = [
-            ("terminate_processes", self._step_terminate_processes),
-            ("purge_memory", self._step_purge_memory),
-            ("destroy_differential_disk", self._step_destroy_differential_disk),
-            ("clean_network_config", self._step_clean_network_config),
-            ("remove_snapshots", self._step_remove_snapshots),
-            ("verify_host_integrity", self._step_verify_host_integrity),
-            ("generate_report", self._step_generate_report),
-        ]
-
-        for step_name, step_func in steps:
-            try:
-                logger.info(f"Ejecutando paso: {step_name}")
-                result = step_func()
-
-                if result:
-                    report.steps_completed.append(step_name)
-                else:
-                    report.steps_failed.append(step_name)
-                    report.warnings.append(f"Paso {step_name} retornó False")
-
-            except Exception as e:
-                report.steps_failed.append(step_name)
-                report.warnings.append(f"Error en {step_name}: {str(e)}")
-                logger.error(f"Error en paso {step_name}: {e}")
-
-        all_passed, checks = self.integrity_verifier.verify_all(
-            self._get_current_component_hashes()
-        )
-        report.integrity_checks = checks
-
-        report.end_time = datetime.now()
-        report.success = len(report.steps_failed) == 0 and all_passed
-
-        if report.success:
-            logger.info(f"Descontaminación completada exitosamente")
-            self.transition_to(BunkerState.DESTROYED)
-        else:
-            logger.error(f"Descontaminación falló: {report.steps_failed}")
-            self.transition_to(BunkerState.ERROR)
-
-        report.signature = self._sign_report(report)
-
-        # Always persist the report — even on failure (forensic evidence)
-        self._save_decontamination_report(report)
-
-        return report.success
-
-    def _save_decontamination_report(self, report: DecontaminationReport):
-        """Persist decontamination report to disk.
-
-        Best-effort: failures are logged but never raised so the caller
-        is not blocked from returning its own success/failure verdict.
-        """
-        try:
-            logs_dir = Path("logs")
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_path = logs_dir / f"{self.config.id}_decontamination_{ts}.json"
-            report_data = {
-                "bunker_id": report.bunker_id,
-                "start_time": report.start_time.isoformat(),
-                "end_time": report.end_time.isoformat(),
-                "success": report.success,
-                "steps_completed": report.steps_completed,
-                "steps_failed": report.steps_failed,
-                "warnings": report.warnings,
-                "signature": report.signature,
-                "integrity_checks": [
-                    {
-                        "component": c.component,
-                        "passed": c.passed,
-                        "details": c.details,
-                        "timestamp": c.timestamp.isoformat(),
-                    }
-                    for c in report.integrity_checks
-                ],
-            }
-            with open(report_path, "w") as f:
-                json.dump(report_data, f, indent=2)
-            logger.info("Decontamination report saved: %s", report_path)
-        except Exception as exc:
-            logger.warning("Could not save decontamination report: %s", exc)
 
     def force_quarantine(self, reason: str):
         """
@@ -449,7 +372,7 @@ class Bunker:
     # --- Private initialisation helpers ---
 
     def _verify_system_requirements(self):
-        from .hypervisor import check_hyper_v_available
+        from .hyperv_client import check_hyper_v_available
         if not check_hyper_v_available():
             raise SystemError("Hyper-V is not available on this host")
         logger.info("Hyper-V verified")
@@ -458,12 +381,12 @@ class Bunker:
         """Load or create the base image for this bunker."""
         # For now: create a fresh VM (no base image template yet)
         # TODO(scenario-B phase 3): use pre-built golden image template
-        from .hypervisor import create_internal_switch
+        from .hyperv_client import create_internal_switch
         self._switch_name = f"lumenos_{self.config.id}_switch"
         create_internal_switch(self._switch_name)
 
     def _allocate_resources(self):
-        from .hypervisor import create_vm
+        from .hyperv_client import create_vm
         from pathlib import Path
         vm_name = f"bunker_{self.config.id}"
         diff_vhd = str(Path("snapshots") / f"{self.config.id}_system.vhdx")
@@ -489,8 +412,7 @@ class Bunker:
 
     def _get_guest_password(self) -> str:
         """Retrieve guest password from Windows Credential Manager."""
-        cred_name = f"bunker_{self.config.id}_guest_password"
-        return self._secret_mgr.get_secret(cred_name) or ""
+        return self._secrets.get_secret("guest_password") or ""
 
     def _propagate_vm_credentials(self):
         """Set VM name and guest credentials on all security layers and the monitor."""
@@ -521,13 +443,13 @@ class Bunker:
     # --- Private termination helpers ---
 
     def _capture_forensic_snapshot(self):
-        from .hypervisor import create_checkpoint
+        from .hyperv_client import create_checkpoint
         if self._vm_name:
             snapshot_name = f"forensic_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             create_checkpoint(self._vm_name, snapshot_name)
 
     def _terminate_processes(self):
-        from .hypervisor import stop_vm
+        from .hyperv_client import stop_vm
         if self._vm_name:
             stop_vm(self._vm_name, force=True)
 
@@ -536,66 +458,6 @@ class Bunker:
         pass
 
     # --- Decontamination steps ---
-
-    def _step_terminate_processes(self) -> bool:
-        """Paso: terminar procesos (VM already stopped in _terminate_processes)."""
-        from .hypervisor import get_vm_status
-        if not self._vm_name:
-            return True
-        status = get_vm_status(self._vm_name)
-        return status is None or status.lower() in ("off", "saved")
-
-    def _step_purge_memory(self) -> bool:
-        """Paso: purgar memoria (VM memory is freed when VM is off)."""
-        return True  # Memory is freed when VM is stopped
-
-    def _step_destroy_differential_disk(self) -> bool:
-        """Paso: destruir disco diferencial."""
-        from .hypervisor import delete_file
-        from pathlib import Path
-        diff_vhd = str(Path("snapshots") / f"{self.config.id}_system.vhdx")
-        return delete_file(diff_vhd)
-
-    def _step_clean_network_config(self) -> bool:
-        """Paso: limpiar configuración de red."""
-        from .hypervisor import remove_switch
-        return remove_switch(f"lumenos_{self.config.id}_switch")
-
-    def _step_remove_snapshots(self) -> bool:
-        """Paso: eliminar snapshots (remove VM with all disks)."""
-        from .hypervisor import remove_vm
-        if not self._vm_name:
-            return True
-        return remove_vm(self._vm_name, force=True)
-
-    def _step_verify_host_integrity(self) -> bool:
-        """Paso: verificar integridad del host + forensic evidence from guest."""
-        from .hypervisor import verify_host_integrity
-        success, _ = verify_host_integrity()
-
-        # Collect forensic evidence from guest event log if VM is still accessible
-        if self._vm_name and self.config.guest_username:
-            try:
-                from .hypervisor import read_guest_event_log
-                events = read_guest_event_log(
-                    self._vm_name,
-                    self.config.guest_username,
-                    self._get_guest_password(),
-                    log_name="Security",
-                    max_events=50,
-                )
-                if events:
-                    findings = self.security_monitor.analyze_event_log(events)
-                    for finding in findings:
-                        logger.warning("Forensic finding: %s", finding)
-            except Exception as exc:
-                logger.debug("Could not read guest event log: %s", exc)
-
-        return success
-
-    def _step_generate_report(self) -> bool:
-        """Paso: generar reporte."""
-        return True  # Report generation is handled by _decontaminate
 
     def _get_current_component_hashes(self) -> Dict[str, str]:
         return {

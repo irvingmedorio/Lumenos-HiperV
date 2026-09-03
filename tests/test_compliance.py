@@ -44,7 +44,7 @@ class TestAuditLog(unittest.TestCase):
 
 class TestComplianceReport(unittest.TestCase):
     def test_default_controls(self):
-        self.assertEqual(len(DEFAULT_CONTROLS), 10)
+        self.assertEqual(len(DEFAULT_CONTROLS), 5)
 
     def test_evaluate_all_pass(self):
         config = {
@@ -55,7 +55,7 @@ class TestComplianceReport(unittest.TestCase):
         }
         report = ComplianceReport()
         result = report.evaluate(config)
-        self.assertEqual(result["passed"], 10)
+        self.assertEqual(result["passed"], 5)
         self.assertEqual(result["failed"], 0)
 
     def test_evaluate_network_fail(self):

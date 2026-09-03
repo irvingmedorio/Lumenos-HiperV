@@ -91,29 +91,28 @@ class AuditLog:
 
 
 # ---------------------------------------------------------------------------
-# Default Security Controls
+# Security Controls Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_CONTROLS = [
-    Control("SC-01", "Network Isolation", "VM network isolated from host"),
-    Control("SC-02", "Filesystem Protection", "Host filesystem not exposed to guest"),
-    Control("SC-03", "Process Monitoring", "Guest processes monitored for injection"),
-    Control("SC-04", "Memory Protection", "Memory integrity checks enabled"),
-    Control("SC-05", "Hypervisor Monitoring", "Hyper-V session monitored"),
-    Control("SC-06", "Decontamination", "Post-analysis cleanup verified"),
-    Control("SC-07", "Integrity Verification", "Component hashes verified"),
-    Control("SC-08", "State Persistence", "Bunker state persisted to SQLite"),
-    Control("SC-09", "Forensic Evidence", "Evidence chain collected and exported"),
-    Control("SC-10", "Audit Logging", "Actions logged for accountability"),
-]
+def _default_controls() -> List[Control]:
+    """Return default security controls — only SC-01..SC-05 are configurable."""
+    result = [
+        Control("SC-01", "Network Isolation", "VM network isolated from host"),
+        Control("SC-03", "Process Monitoring", "Guest processes monitored for injection"),
+        Control("SC-04", "Memory Protection", "Memory integrity checks enabled"),
+        Control("SC-05", "Hypervisor Monitoring", "Hyper-V session monitored"),
+        Control("SC-08", "State Persistence", "Bunker state persisted to SQLite"),
+    ]
+    return result
+
+DEFAULT_CONTROLS = _default_controls()
 
 
 class ComplianceReport:
     """Aggregate compliance status across security controls."""
 
     def __init__(self, controls: Optional[List[Control]] = None):
-        self.controls = controls or [Control(c.control_id, c.name, c.description)
-                                     for c in DEFAULT_CONTROLS]
+        self.controls = controls or _default_controls()
         self.audit = AuditLog()
 
     def evaluate(self, bunker_config=None) -> Dict[str, Any]:
@@ -127,8 +126,6 @@ class ComplianceReport:
             # Map controls to config flags
             if ctrl.control_id == "SC-01":
                 c.status = ControlStatus.PASS if config.get("enable_network_isolation") else ControlStatus.FAIL
-            elif ctrl.control_id == "SC-02":
-                c.status = ControlStatus.PASS  # Always enabled (no host FS passthrough)
             elif ctrl.control_id == "SC-03":
                 c.status = ControlStatus.PASS if config.get("enable_process_monitoring", True) else ControlStatus.FAIL
             elif ctrl.control_id == "SC-04":
@@ -138,9 +135,9 @@ class ComplianceReport:
             elif ctrl.control_id == "SC-08":
                 c.status = ControlStatus.PASS  # SQLite always enabled now
             else:
-                c.status = ControlStatus.PASS  # Assumed pass for SC-06/07/09/10
+                c.status = ControlStatus.PASS  # Assumed pass for configurable controls
 
-            c.evidence = f"Automated check at {c.checked_at}"
+            c.evidence = f"Automated check at {datetime.now().isoformat()}"
             results.append(c)
 
         passed = sum(1 for r in results if r.status == ControlStatus.PASS)

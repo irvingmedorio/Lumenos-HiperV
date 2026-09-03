@@ -15,14 +15,26 @@ from pathlib import Path
 # Configuración de logging (anchored to this package's location)
 _LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(_LOG_DIR / "lumenos_sandbox.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
+
+from .observability import JSONFormatter
+import logging
+
+_root = logging.getLogger('LUMENOS_SANDBOX')
+_root.setLevel(logging.INFO)
+
+# Clear existing handlers
+for h in _root.handlers[:]:
+    _root.removeHandler(h)
+
+# File handler with JSON formatter
+_file_handler = logging.FileHandler(_LOG_DIR / "lumenos_sandbox.log", encoding="utf-8")
+_file_handler.setFormatter(JSONFormatter())
+_root.addHandler(_file_handler)
+
+# Console handler with JSON formatter
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(JSONFormatter())
+_root.addHandler(_console_handler)
 
 # Re-export everything from sub-modules
 from .types import (
@@ -31,7 +43,6 @@ from .types import (
     ThreatLevel,
     EscapeAttemptType,
     VALID_STATE_TRANSITIONS,
-    LAYER_FAILURE_PROBABILITY,
     _component_baseline_digest,
     BunkerConfig,
     SecurityEvent,
@@ -62,6 +73,7 @@ from .layers import (
 )
 
 from .bunker import Bunker, get_state_store, set_state_store
+from .decontamination import DecontaminationRunner
 from .manager import DualBunkerManager
 from .state import BunkerStateStore
 from .observability import JSONFormatter, MetricsCollector, check_health
@@ -83,7 +95,6 @@ __all__ = [
     "EscapeAttemptType",
     # Constants
     "VALID_STATE_TRANSITIONS",
-    "LAYER_FAILURE_PROBABILITY",
     # Exceptions
     "LumenosException",
     "InvalidStateTransition",
@@ -108,6 +119,7 @@ __all__ = [
     "MemorySecurityLayer",
     "HypervisorSecurityLayer",
     "Bunker",
+    "DecontaminationRunner",
     "DualBunkerManager",
     "BunkerStateStore",
     "get_state_store",

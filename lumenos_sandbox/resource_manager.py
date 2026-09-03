@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, UTC
 from enum import Enum, auto
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -70,8 +70,8 @@ class VMResourceAlloc:
     priority: int = 5  # 1 (lowest) to 10 (highest)
     state: VMState = VMState.CREATED
     memory_compressed: bool = False
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    last_accessed: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    last_accessed: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 @dataclass

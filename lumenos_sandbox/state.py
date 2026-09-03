@@ -83,11 +83,22 @@ class BunkerStateStore:
         now = datetime.now().isoformat()
         conn = self._get_conn()
 
+        # Extract and sanitize config before serialization
+        config_dict = dict(data.get("config", {}))
+        guest_password = config_dict.pop("guest_password", "")
+        
+        # Convert SecurityLayer enum keys to strings for JSON serialization
+        if "failure_probabilities" in config_dict:
+            fp = config_dict["failure_probabilities"]
+            config_dict["failure_probabilities"] = {k.value if hasattr(k, 'value') else str(k): v for k, v in fp.items()}
+        
         # Encrypt sensitive fields before storage
-        config_str = json.dumps(data.get("config", {}), default=str)
+        config_str = json.dumps(config_dict, default=str)
         signing_key = data.get("signing_key")
         if signing_key:
             signing_key = SecretManager.encrypt(signing_key, self._encryption_key)
+        if guest_password:
+            guest_password = SecretManager.encrypt(guest_password, self._encryption_key)
 
         conn.execute(
             """INSERT INTO bunkers
@@ -136,6 +147,18 @@ class BunkerStateStore:
             except Exception:
                 logger.warning("Could not decrypt signing_key for %s; treating as plaintext", bunker_id)
 
+        guest_password = row["config"]
+        import json
+        config_dict = json.loads(guest_password) if guest_password else {}
+        guest_pw = config_dict.get("guest_password")
+        if guest_pw:
+            try:
+                guest_pw = SecretManager.decrypt(guest_pw, self._encryption_key)
+            except Exception:
+                logger.warning("Could not decrypt guest_password for %s; treating as plaintext", bunker_id)
+        else:
+            guest_pw = None
+
         return {
             "bunker_id": row["bunker_id"],
             "config": json.loads(row["config"]),
@@ -147,6 +170,7 @@ class BunkerStateStore:
             "activated_at": row["activated_at"],
             "terminated_at": row["terminated_at"],
             "updated_at": row["updated_at"],
+            "guest_password": guest_pw,
         }
 
     def list_all(self) -> List[Dict[str, Any]]:

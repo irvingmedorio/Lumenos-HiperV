@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lumenos_sandbox import (
     Bunker, BunkerConfig, BunkerState, SecurityEvent,
+    DecontaminationRunner,
     DualBunkerManager, SecurityLayer, ThreatLevel,
     IntegrityVerifier, SecurityMonitor,
     EscapeAttempt, EscapeAttemptType,
@@ -54,17 +55,17 @@ class TestEscapeResistance(unittest.TestCase):
             cpu_cores=2
         )
         self.bunker = Bunker(self.config)
-        self._patcher_hv = patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-        self._patcher_switch = patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-        self._patcher_vm = patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-        self._patcher_integ = patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-        self._patcher_fw = patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-        self._patcher_conn = patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-        self._patcher_proc = patch("lumenos_sandbox.hypervisor.get_guest_processes",
+        self._patcher_hv = patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+        self._patcher_switch = patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+        self._patcher_vm = patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+        self._patcher_integ = patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+        self._patcher_fw = patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+        self._patcher_conn = patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+        self._patcher_proc = patch("lumenos_sandbox.hyperv_client.get_guest_processes",
                                    return_value=[{"Id": 1, "ProcessName": "System"}])
-        self._patcher_vbs = patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+        self._patcher_vbs = patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
                                  return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-        self._patcher_reg = patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+        self._patcher_reg = patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
         self._patcher_hv.start()
         self._patcher_switch.start()
         self._patcher_vm.start()
@@ -314,17 +315,17 @@ class TestDecontaminationProtocol(unittest.TestCase):
             decontamination_minutes=1
         )
         self.bunker = Bunker(self.config)
-        self._patcher_hv = patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-        self._patcher_switch = patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-        self._patcher_vm = patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-        self._patcher_integ = patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-        self._patcher_fw = patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-        self._patcher_conn = patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-        self._patcher_proc = patch("lumenos_sandbox.hypervisor.get_guest_processes",
+        self._patcher_hv = patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+        self._patcher_switch = patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+        self._patcher_vm = patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+        self._patcher_integ = patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+        self._patcher_fw = patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+        self._patcher_conn = patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+        self._patcher_proc = patch("lumenos_sandbox.hyperv_client.get_guest_processes",
                                    return_value=[{"Id": 1, "ProcessName": "System"}])
-        self._patcher_vbs = patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+        self._patcher_vbs = patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
                                  return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-        self._patcher_reg = patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+        self._patcher_reg = patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
         self._patcher_hv.start()
         self._patcher_switch.start()
         self._patcher_vm.start()
@@ -346,14 +347,22 @@ class TestDecontaminationProtocol(unittest.TestCase):
         self._patcher_vbs.stop()
         self._patcher_reg.stop()
 
-    @patch("lumenos_sandbox.hypervisor.create_checkpoint", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.stop_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_vm_status", return_value="Off")
-    @patch("lumenos_sandbox.hypervisor.delete_file", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.verify_host_integrity", return_value=(True, "OK"))
-    @patch("lumenos_sandbox.hypervisor.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.create_checkpoint", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.stop_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.hyperv_client.delete_file", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.hyperv_client.read_guest_event_log", return_value=[])
+    # Decontamination module patches
+    @patch("lumenos_sandbox.decontamination.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.decontamination.delete_file", return_value=True)
+    @patch("lumenos_sandbox.decontamination.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.decontamination.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.decontamination.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.decontamination.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.decontamination.DecontaminationRunner._save_decontamination_report")
     def test_decontamination_success(self, *mocks):
         """Verifica descontaminación exitosa."""
         self.bunker.initialize()
@@ -364,14 +373,14 @@ class TestDecontaminationProtocol(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(self.bunker.state, BunkerState.DESTROYED)
 
-    @patch("lumenos_sandbox.hypervisor.create_checkpoint", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.stop_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_vm_status", return_value="Off")
-    @patch("lumenos_sandbox.hypervisor.delete_file", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.verify_host_integrity", return_value=(True, "OK"))
-    @patch("lumenos_sandbox.hypervisor.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.create_checkpoint", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.stop_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.hyperv_client.delete_file", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.hyperv_client.read_guest_event_log", return_value=[])
     def test_decontamination_clears_memory(self, *mocks):
         """Verifica verificación de limpieza de memoria."""
         self.bunker.initialize()
@@ -384,14 +393,14 @@ class TestDecontaminationProtocol(unittest.TestCase):
 
         self.assertFalse(memory_layer.active)
 
-    @patch("lumenos_sandbox.hypervisor.create_checkpoint", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.stop_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_vm_status", return_value="Off")
-    @patch("lumenos_sandbox.hypervisor.delete_file", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.verify_host_integrity", return_value=(True, "OK"))
-    @patch("lumenos_sandbox.hypervisor.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.create_checkpoint", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.stop_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.hyperv_client.delete_file", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.hyperv_client.read_guest_event_log", return_value=[])
     def test_decontamination_destroys_disk(self, *mocks):
         """Verifica verificación de destrucción de disco diferencial."""
         self.bunker.initialize()
@@ -404,14 +413,14 @@ class TestDecontaminationProtocol(unittest.TestCase):
 
         self.assertFalse(fs_layer.active)
 
-    @patch("lumenos_sandbox.hypervisor.create_checkpoint", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.stop_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_vm_status", return_value="Off")
-    @patch("lumenos_sandbox.hypervisor.delete_file", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.verify_host_integrity", return_value=(True, "OK"))
-    @patch("lumenos_sandbox.hypervisor.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.create_checkpoint", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.stop_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.hyperv_client.delete_file", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.hyperv_client.read_guest_event_log", return_value=[])
     def test_decontamination_clears_network(self, *mocks):
         """Verifica verificación de limpieza de configuración de red."""
         self.bunker.initialize()
@@ -423,14 +432,22 @@ class TestDecontaminationProtocol(unittest.TestCase):
 
         self.assertFalse(network_layer.active)
 
-    @patch("lumenos_sandbox.hypervisor.create_checkpoint", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.stop_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_vm_status", return_value="Off")
-    @patch("lumenos_sandbox.hypervisor.delete_file", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.verify_host_integrity", return_value=(True, "OK"))
-    @patch("lumenos_sandbox.hypervisor.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.create_checkpoint", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.stop_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.hyperv_client.delete_file", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.hyperv_client.read_guest_event_log", return_value=[])
+    # Decontamination module patches
+    @patch("lumenos_sandbox.decontamination.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.decontamination.delete_file", return_value=True)
+    @patch("lumenos_sandbox.decontamination.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.decontamination.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.decontamination.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.decontamination.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.decontamination.DecontaminationRunner._save_decontamination_report")
     def test_decontamination_after_quarantine(self, *mocks):
         """Verifica descontaminación después de cuarentena."""
         self.bunker.initialize()
@@ -442,7 +459,21 @@ class TestDecontaminationProtocol(unittest.TestCase):
 
         # En cuarentena, solo se puede destruir manualmente
         self.bunker.state = BunkerState.DECONTAMINATING
-        self.bunker._decontaminate()
+        runner = DecontaminationRunner(
+            config=self.bunker.config,
+            vm_name=self.bunker._vm_name or "",
+            guest_username=self.bunker.config.guest_username,
+            guest_password=self.bunker._get_guest_password(),
+            integrity_verifier=self.bunker.integrity_verifier,
+            security_monitor=self.bunker.security_monitor,
+            signing_key=self.bunker._signing_key,
+        )
+        report = runner.run()
+
+        if report.success:
+            self.bunker.transition_to(BunkerState.DESTROYED)
+        else:
+            self.bunker.transition_to(BunkerState.ERROR)
 
         self.assertEqual(self.bunker.state, BunkerState.DESTROYED)
 
@@ -510,16 +541,16 @@ class TestProbabilityCalculations(unittest.TestCase):
 
         self.assertEqual(prob, 1e-6)
 
-    @patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_guest_processes", return_value=[{"Id": 1, "ProcessName": "System"}])
-    @patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+    @patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_guest_processes", return_value=[{"Id": 1, "ProcessName": "System"}])
+    @patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
            return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-    @patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
     def test_combined_probability_calculation(self, *mocks):
         """Verifica cálculo de probabilidad combinada."""
         config = BunkerConfig(id="prob_test", name="ProbTest")
@@ -534,16 +565,16 @@ class TestProbabilityCalculations(unittest.TestCase):
 
         self.assertAlmostEqual(prob, expected, places=45)
 
-    @patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_guest_processes", return_value=[{"Id": 1, "ProcessName": "System"}])
-    @patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+    @patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_guest_processes", return_value=[{"Id": 1, "ProcessName": "System"}])
+    @patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
            return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-    @patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
     def test_probability_threshold(self, *mocks):
         """Verifica umbral de seguridad."""
         config = BunkerConfig(id="threshold_test", name="ThresholdTest")
@@ -567,17 +598,17 @@ class TestConcurrentSecurity(unittest.TestCase):
     def setUp(self):
         self.config = BunkerConfig(id="concurrent_test", name="ConcurrentTest")
         self.bunker = Bunker(self.config)
-        self._patcher_hv = patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-        self._patcher_switch = patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-        self._patcher_vm = patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-        self._patcher_integ = patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-        self._patcher_fw = patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-        self._patcher_conn = patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-        self._patcher_proc = patch("lumenos_sandbox.hypervisor.get_guest_processes",
+        self._patcher_hv = patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+        self._patcher_switch = patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+        self._patcher_vm = patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+        self._patcher_integ = patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+        self._patcher_fw = patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+        self._patcher_conn = patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+        self._patcher_proc = patch("lumenos_sandbox.hyperv_client.get_guest_processes",
                                    return_value=[{"Id": 1, "ProcessName": "System"}])
-        self._patcher_vbs = patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+        self._patcher_vbs = patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
                                  return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-        self._patcher_reg = patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+        self._patcher_reg = patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
         self._patcher_hv.start()
         self._patcher_switch.start()
         self._patcher_vm.start()
@@ -675,17 +706,17 @@ class TestAntiExfiltration(unittest.TestCase):
     def setUp(self):
         self.config = BunkerConfig(id="exfil_test", name="ExfilTest")
         self.bunker = Bunker(self.config)
-        self._patcher_hv = patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-        self._patcher_switch = patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-        self._patcher_vm = patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-        self._patcher_integ = patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-        self._patcher_fw = patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-        self._patcher_conn = patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-        self._patcher_proc = patch("lumenos_sandbox.hypervisor.get_guest_processes",
+        self._patcher_hv = patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+        self._patcher_switch = patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+        self._patcher_vm = patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+        self._patcher_integ = patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+        self._patcher_fw = patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+        self._patcher_conn = patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+        self._patcher_proc = patch("lumenos_sandbox.hyperv_client.get_guest_processes",
                                    return_value=[{"Id": 1, "ProcessName": "System"}])
-        self._patcher_vbs = patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+        self._patcher_vbs = patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
                                  return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-        self._patcher_reg = patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+        self._patcher_reg = patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
         self._patcher_hv.start()
         self._patcher_switch.start()
         self._patcher_vm.start()
@@ -768,17 +799,17 @@ class TestAntiPersistence(unittest.TestCase):
     def setUp(self):
         self.config = BunkerConfig(id="persist_test", name="PersistTest")
         self.bunker = Bunker(self.config)
-        self._patcher_hv = patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-        self._patcher_switch = patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-        self._patcher_vm = patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-        self._patcher_integ = patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-        self._patcher_fw = patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-        self._patcher_conn = patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-        self._patcher_proc = patch("lumenos_sandbox.hypervisor.get_guest_processes",
+        self._patcher_hv = patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+        self._patcher_switch = patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+        self._patcher_vm = patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+        self._patcher_integ = patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+        self._patcher_fw = patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+        self._patcher_conn = patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+        self._patcher_proc = patch("lumenos_sandbox.hyperv_client.get_guest_processes",
                                    return_value=[{"Id": 1, "ProcessName": "System"}])
-        self._patcher_vbs = patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+        self._patcher_vbs = patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
                                  return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-        self._patcher_reg = patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+        self._patcher_reg = patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
         self._patcher_hv.start()
         self._patcher_switch.start()
         self._patcher_vm.start()
@@ -811,14 +842,14 @@ class TestAntiPersistence(unittest.TestCase):
         # El disco diferencial debe estar configurado
         self.assertTrue(status["active"])
 
-    @patch("lumenos_sandbox.hypervisor.create_checkpoint", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.stop_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_vm_status", return_value="Off")
-    @patch("lumenos_sandbox.hypervisor.delete_file", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.verify_host_integrity", return_value=(True, "OK"))
-    @patch("lumenos_sandbox.hypervisor.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.create_checkpoint", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.stop_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.hyperv_client.delete_file", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.hyperv_client.read_guest_event_log", return_value=[])
     def test_disk_destroyed_on_termination(self, *mocks):
         """Verifica de destrucción de disco al terminar."""
         self.bunker.initialize()
@@ -861,17 +892,17 @@ class TestMemorySafety(unittest.TestCase):
     def setUp(self):
         self.config = BunkerConfig(id="memory_test", name="MemoryTest")
         self.bunker = Bunker(self.config)
-        self._patcher_hv = patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-        self._patcher_switch = patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-        self._patcher_vm = patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-        self._patcher_integ = patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-        self._patcher_fw = patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-        self._patcher_conn = patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-        self._patcher_proc = patch("lumenos_sandbox.hypervisor.get_guest_processes",
+        self._patcher_hv = patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+        self._patcher_switch = patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+        self._patcher_vm = patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+        self._patcher_integ = patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+        self._patcher_fw = patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+        self._patcher_conn = patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+        self._patcher_proc = patch("lumenos_sandbox.hyperv_client.get_guest_processes",
                                    return_value=[{"Id": 1, "ProcessName": "System"}])
-        self._patcher_vbs = patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+        self._patcher_vbs = patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
                                  return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-        self._patcher_reg = patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+        self._patcher_reg = patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
         self._patcher_hv.start()
         self._patcher_switch.start()
         self._patcher_vm.start()
@@ -936,17 +967,17 @@ class TestHypervisorSecurity(unittest.TestCase):
     def setUp(self):
         self.config = BunkerConfig(id="hyperv_test", name="HypervTest")
         self.bunker = Bunker(self.config)
-        self._patcher_hv = patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-        self._patcher_switch = patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-        self._patcher_vm = patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-        self._patcher_integ = patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-        self._patcher_fw = patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-        self._patcher_conn = patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-        self._patcher_proc = patch("lumenos_sandbox.hypervisor.get_guest_processes",
+        self._patcher_hv = patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+        self._patcher_switch = patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+        self._patcher_vm = patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+        self._patcher_integ = patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+        self._patcher_fw = patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+        self._patcher_conn = patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+        self._patcher_proc = patch("lumenos_sandbox.hyperv_client.get_guest_processes",
                                    return_value=[{"Id": 1, "ProcessName": "System"}])
-        self._patcher_vbs = patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+        self._patcher_vbs = patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
                                  return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-        self._patcher_reg = patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
+        self._patcher_reg = patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
         self._patcher_hv.start()
         self._patcher_switch.start()
         self._patcher_vm.start()
@@ -1016,24 +1047,24 @@ class TestStressSecurity(unittest.TestCase):
     Verifica que el sistema mantiene la seguridad bajo carga extrema.
     """
 
-    @patch("lumenos_sandbox.hypervisor.check_hyper_v_available", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.create_internal_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.create_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.enable_guest_integration", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.configure_guest_firewall", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.test_guest_connectivity", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_guest_processes", return_value=[{"Id": 1, "ProcessName": "System"}])
-    @patch("lumenos_sandbox.hypervisor.check_guest_vbs_status",
+    @patch("lumenos_sandbox.hyperv_client.check_hyper_v_available", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.create_internal_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.create_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.enable_guest_integration", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.configure_guest_firewall", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.test_guest_connectivity", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_guest_processes", return_value=[{"Id": 1, "ProcessName": "System"}])
+    @patch("lumenos_sandbox.hyperv_client.check_guest_vbs_status",
            return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True})
-    @patch("lumenos_sandbox.hypervisor.check_guest_registry", return_value=[])
-    @patch("lumenos_sandbox.hypervisor.create_checkpoint", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.stop_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.get_vm_status", return_value="Off")
-    @patch("lumenos_sandbox.hypervisor.delete_file", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_switch", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.remove_vm", return_value=True)
-    @patch("lumenos_sandbox.hypervisor.verify_host_integrity", return_value=(True, "OK"))
-    @patch("lumenos_sandbox.hypervisor.read_guest_event_log", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.check_guest_registry", return_value=[])
+    @patch("lumenos_sandbox.hyperv_client.create_checkpoint", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.stop_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.get_vm_status", return_value="Off")
+    @patch("lumenos_sandbox.hyperv_client.delete_file", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_switch", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.remove_vm", return_value=True)
+    @patch("lumenos_sandbox.hyperv_client.verify_host_integrity", return_value=(True, "OK"))
+    @patch("lumenos_sandbox.hyperv_client.read_guest_event_log", return_value=[])
     def test_rapid_session_cycles(self, *mocks):
         """Verifica ciclos rápidos de sesión."""
         config = BunkerConfig(

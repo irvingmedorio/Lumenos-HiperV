@@ -24,14 +24,13 @@ def _fernet_available() -> bool:
 
 
 def _b64url_encode(raw: bytes) -> str:
-    """URL-safe base64 encode (no padding, Fernet-compatible)."""
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    """URL-safe base64 encode with padding (Fernet-compatible)."""
+    return base64.urlsafe_b64encode(raw).decode("ascii")
 
 
 def _b64url_decode(s: str) -> bytes:
-    """URL-safe base64 decode (restores padding)."""
-    padded = s + "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(padded)
+    """URL-safe base64 decode."""
+    return base64.urlsafe_b64decode(s)
 
 
 class SecretManager:

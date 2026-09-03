@@ -25,7 +25,7 @@ logger = logging.getLogger('LUMENOS_SANDBOX')
 class IntegrityVerifier:
     """
     Verificador de integridad del sistema.
-    Realiza verificaciones criptográficas de componentes críticos.
+    Realiza verificaciones criptogr├íficas de componentes cr├¡ticos.
     """
 
     CRITICAL_COMPONENTS = [
@@ -86,7 +86,7 @@ class IntegrityVerifier:
         return check
 
     def verify_all(self, current_hashes: Dict[str, str]) -> Tuple[bool, List[IntegrityCheck]]:
-        """Verifica todos los componentes críticos."""
+        """Verifica todos los componentes cr├¡ticos."""
         results = []
         all_passed = True
 
@@ -150,7 +150,7 @@ class SecurityMonitor:
         ]
     }
 
-    def __init__(self, bunker_id: str, *, metrics=None):
+    def __init__(self, bunker_id: str, *, metrics=None, monitor_interval: float = 5.0):
         self.bunker_id = bunker_id
         self.events: List[SecurityEvent] = []
         self.escape_attempts: List[EscapeAttemptType] = []
@@ -158,6 +158,7 @@ class SecurityMonitor:
         self._monitoring_active = False
         self._monitor_thread: Optional[threading.Thread] = None
         self._metrics = metrics  # MetricsCollector or None
+        self._monitor_interval = monitor_interval
         # VM credentials for hypervisor queries (set via set_vm_credentials)
         self._vm_name: Optional[str] = None
         self._username: str = ""
@@ -196,7 +197,7 @@ class SecurityMonitor:
                 self._check_network_activity()
                 self._check_process_activity()
                 self._check_memory_integrity()
-                time.sleep(1)  # Intervalo de monitoreo
+                time.sleep(self._monitor_interval)
             except Exception as e:
                 logger.error(f"Error en monitoreo: {e}")
 
@@ -206,7 +207,7 @@ class SecurityMonitor:
             return
 
         try:
-            from .hypervisor import read_guest_event_log
+            from .hyperv_client import read_guest_event_log
             events = read_guest_event_log(
                 self._vm_name, self._username, self._password,
                 log_name="Security", max_events=20,
@@ -235,7 +236,7 @@ class SecurityMonitor:
             return
 
         try:
-            from .hypervisor import test_guest_connectivity
+            from .hyperv_client import test_guest_connectivity
             # test_guest_connectivity returns True if BLOCKED (good)
             is_blocked = test_guest_connectivity(
                 self._vm_name, self._username, self._password,
@@ -246,7 +247,7 @@ class SecurityMonitor:
                     layer=SecurityLayer.NETWORK,
                     event_type="ISOLATION_BREACH",
                     severity=ThreatLevel.CRITICAL,
-                    description="Guest can reach external network — isolation broken",
+                    description="Guest can reach external network ÔÇö isolation broken",
                     bunker_id=self.bunker_id,
                 )
                 self.log_event(event)
@@ -259,7 +260,7 @@ class SecurityMonitor:
             return
 
         try:
-            from .hypervisor import get_guest_processes
+            from .hyperv_client import get_guest_processes
             processes = get_guest_processes(
                 self._vm_name, self._username, self._password,
             )
@@ -293,7 +294,7 @@ class SecurityMonitor:
             return
 
         try:
-            from .hypervisor import check_guest_vbs_status
+            from .hyperv_client import check_guest_vbs_status
             vbs = check_guest_vbs_status(
                 self._vm_name, self._username, self._password,
             )
@@ -331,7 +332,7 @@ class SecurityMonitor:
             self._metrics.inc(f"security_events_{event.severity.name}")
             self._metrics.inc("security_events_total")
 
-        # Log según severidad
+        # Log seg├║n severidad
         if event.severity == ThreatLevel.CRITICAL:
             logger.critical(f"SECURITY EVENT: {event.event_type} - {event.description}")
         elif event.severity == ThreatLevel.HIGH:
@@ -344,7 +345,7 @@ class SecurityMonitor:
     def detect_escape_attempt(self, attempt_type: EscapeAttemptType, details: str) -> bool:
         """
         Detecta y registra un intento de escape.
-        Retorna True si se detecta un patrón de escape.
+        Retorna True si se detecta un patr├│n de escape.
         """
         with self._lock:
             self.escape_attempts.append(attempt_type)
@@ -417,12 +418,12 @@ class SecurityMonitor:
         """Analyze Windows Event Log / Sysmon entries for suspicious patterns.
 
         Recognized Sysmon Event IDs:
-          1  — Process Create
-          3  — Network Connection
-          7  — Image Loaded
-          8  — CreateRemoteThread
-          10 — ProcessAccess
-          11 — FileCreate
+          1  ÔÇö Process Create
+          3  ÔÇö Network Connection
+          7  ÔÇö Image Loaded
+          8  ÔÇö CreateRemoteThread
+          10 ÔÇö ProcessAccess
+          11 ÔÇö FileCreate
         """
         findings: List[str] = []
 

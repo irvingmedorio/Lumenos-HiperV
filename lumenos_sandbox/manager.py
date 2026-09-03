@@ -179,7 +179,7 @@ class DualBunkerManager:
 
 def main():
     """Función principal de demostración."""
-    from .hypervisor import check_hyper_v_available
+    from .hyperv_client import check_hyper_v_available
 
     print("=" * 70)
     print("  LUMENOS SANDBOX ARCHITECTURE v2.0.0")
