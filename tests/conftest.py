@@ -53,3 +53,16 @@ BACKEND_MOCKS = {
     "lumenos_sandbox.hypervisor.mock_backend.MockBackend.get_guest_processes": _MM2(return_value=[{"Id": 1, "ProcessName": "System"}]),
     "lumenos_sandbox.hypervisor.mock_backend.MockBackend.check_guest_vbs_status": _MM2(return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True}),
 }
+
+import pytest
+@pytest.fixture(autouse=True)
+def _reset_hypervisor_backend():
+    try:
+        from lumenos_sandbox.hypervisor import reset_backend
+        reset_backend()
+    except: pass
+    yield
+    try:
+        from lumenos_sandbox.hypervisor import reset_backend
+        reset_backend()
+    except: pass

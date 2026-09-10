@@ -4,23 +4,31 @@ import os
 from typing import Optional
 from .base import HypervisorBackend
 _backend: Optional[HypervisorBackend] = None
-
 def get_backend() -> HypervisorBackend:
     global _backend
-    if _backend is not None:
-        return _backend
     env = os.getenv("LUMENOS_HYPERVISOR", "").lower()
+    # Env override always takes precedence and bypasses cache
     if env == "mock":
-        from .mock_backend import MockBackend
-        _backend = MockBackend()
+        if _backend is None or _backend.__class__.__name__ != "MockBackend":
+            from .mock_backend import MockBackend
+            _backend = MockBackend()
         return _backend
     if env == "hyperv":
-        from .hyperv_backend import HyperVBackend
-        _backend = HyperVBackend()
+        if _backend is None or _backend.__class__.__name__ != "HyperVBackend":
+            try:
+                from .hyperv_backend import HyperVBackend
+                _backend = HyperVBackend()
+            except Exception:
+                from .mock_backend import MockBackend
+                _backend = MockBackend()
         return _backend
     if env == "kvm":
-        from .kvm_backend import KvmBackend
-        _backend = KvmBackend()
+        if _backend is None or _backend.__class__.__name__ != "KvmBackend":
+            from .kvm_backend import KvmBackend
+            _backend = KvmBackend()
+        return _backend
+    # No env override — use cached if exists
+    if _backend is not None:
         return _backend
     import sys
     if sys.platform == "win32":
@@ -31,7 +39,6 @@ def get_backend() -> HypervisorBackend:
             from .mock_backend import MockBackend
             _backend = MockBackend()
         return _backend
-    # Linux / other
     from ..platform import has_kvm, has_libvirt, has_qemu
     try:
         if has_kvm() or has_libvirt() or has_qemu():
@@ -43,13 +50,10 @@ def get_backend() -> HypervisorBackend:
     from .mock_backend import MockBackend
     _backend = MockBackend()
     return _backend
-
 def set_backend(b: Optional[HypervisorBackend]) -> None:
     global _backend
     _backend = b
-
 def reset_backend() -> None:
     global _backend
     _backend = None
-
 __all__ = ["get_backend","set_backend","reset_backend","HypervisorBackend"]

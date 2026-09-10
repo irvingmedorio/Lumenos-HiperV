@@ -113,7 +113,7 @@ class BunkerConfig:
     guest_username: str = "Administrator"
     guest_password: str = ""
     sysmon_installed: bool = False
-    sysmon_path: Path = Path("C:/Tools/Sysmon64.exe")
+    sysmon_path: str = "C:\\Tools\\Sysmon64.exe"
     monitor_interval_seconds: float = 5.0
     failure_probabilities: Dict[SecurityLayer, float] = field(default_factory=lambda: {
         SecurityLayer.NETWORK: 1e-6,

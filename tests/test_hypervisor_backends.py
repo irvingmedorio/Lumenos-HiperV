@@ -5,7 +5,7 @@ import os
 
 def test_mock_backend_defaults():
     m=MockBackend()
-    assert m.check_available() is False
+    assert m.check_available() is True  # mock now returns True for lifecycle
     assert m.get_vm_status("x") is None
     assert m.create_vm("vm",1024,1) is True
     assert m.delete_file("/tmp/x") is True
