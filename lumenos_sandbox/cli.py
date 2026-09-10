@@ -115,16 +115,21 @@ def main():
 
 
 def cmd_status(_args=None):
-    from .hyperv_client import check_hyper_v_available
-
-    hv = check_hyper_v_available()
-    print(f"Hyper-V: {'[OK] Available' if hv else '[FAIL] Not available'}")
-    if not hv:
-        print(
-            "  -> Enable Hyper-V: Enable-WindowsOptionalFeature "
-            "-Online -FeatureName Microsoft-Hyper-V-All"
-        )
-    return 0 if hv else 1
+    from .platform import detect_hypervisor, HypervisorType
+    from .hypervisor import get_backend
+    hv = detect_hypervisor()
+    backend = get_backend()
+    avail = backend.check_available()
+    if hv == HypervisorType.HYPERV:
+        print(f"Hyper-V: {'[OK] Available' if avail else '[FAIL] Not available'}")
+        if not avail:
+            print("  -> Enable Hyper-V: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All")
+    elif hv == HypervisorType.KVM:
+        print(f"KVM: {'[OK] Available (virsh/qemu-img)' if avail else '[FAIL] Not available — install qemu-kvm libvirt-daemon-system virtinst'}")
+    else:
+        print(f"Mock: {'[WARN] No hypervisor detected — using MockBackend' if not avail else '[OK] Mock active'}")
+        print("  -> Hint: set LUMENOS_HYPERVISOR=kvm|hyperv|mock to override")
+    return 0 if avail else 1
 
 
 def cmd_start(args):

@@ -15,6 +15,7 @@ authors = [{name = "Irvin Diaz Medorio"}]
 dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
 analysis = ["psutil>=5.9.0", "cryptography>=40.0.0"]
 secrets = ["keyring>=24.0.0"]
+linux = ["libvirt-python; sys_platform != 'win32'"]
 api = ["fastapi>=0.104.0", "uvicorn[standard]>=0.24.0", "httpx>=0.25.0"]
 
 [project.scripts]

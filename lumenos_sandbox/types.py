@@ -113,7 +113,7 @@ class BunkerConfig:
     guest_username: str = "Administrator"
     guest_password: str = ""
     sysmon_installed: bool = False
-    sysmon_path: str = "C:\\Tools\\Sysmon64.exe"
+    sysmon_path: Path = Path("C:/Tools/Sysmon64.exe")
     monitor_interval_seconds: float = 5.0
     failure_probabilities: Dict[SecurityLayer, float] = field(default_factory=lambda: {
         SecurityLayer.NETWORK: 1e-6,
@@ -167,6 +167,22 @@ class BunkerConfig:
         
         return cls(**data)
 
+
+
+def resolve_sysmon_path(platform_hint: str = "") -> Path:
+    """Resolve sysmon path per platform."""
+    if platform_hint == "linux":
+        return Path("/opt/sysmon/sysmon")
+    if platform_hint == "windows":
+        return Path("C:/Tools/Sysmon64.exe")
+    # Auto-detect via platform helper (no direct sys.platform outside platform.py)
+    try:
+        from .platform import is_linux
+        if is_linux():
+            return Path("/opt/sysmon/sysmon")
+    except Exception:
+        pass
+    return Path("C:/Tools/Sysmon64.exe")
 
 @dataclass
 class SecurityEvent:

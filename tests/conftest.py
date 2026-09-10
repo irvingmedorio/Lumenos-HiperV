@@ -45,3 +45,11 @@ GUEST_MOCKS = {
     "lumenos_sandbox.hyperv_client.kill_guest_process": MagicMock(return_value=True),
     "lumenos_sandbox.hyperv_client.install_sysmon_in_guest": MagicMock(return_value=True),
 }
+# Cross-platform backend mocks — ensure MockBackend behaves like patched hyperv_client
+from unittest.mock import MagicMock as _MM2
+BACKEND_MOCKS = {
+    "lumenos_sandbox.hypervisor.mock_backend.MockBackend.check_guest_registry": _MM2(return_value=[]),
+    "lumenos_sandbox.hypervisor.mock_backend.MockBackend.test_guest_connectivity": _MM2(return_value=True),
+    "lumenos_sandbox.hypervisor.mock_backend.MockBackend.get_guest_processes": _MM2(return_value=[{"Id": 1, "ProcessName": "System"}]),
+    "lumenos_sandbox.hypervisor.mock_backend.MockBackend.check_guest_vbs_status": _MM2(return_value={"vbs_enabled": True, "hvci_enabled": False, "secure_boot": True}),
+}

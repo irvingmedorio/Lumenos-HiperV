@@ -9,3 +9,5 @@ snapshots/*
 *.db
 .venv/
 .pytest_cache/
+# Local Pi runtime state
+.atl/

@@ -57,7 +57,7 @@ class Bunker:
     Implementa todas las capas de seguridad y el ciclo de vida completo.
     """
 
-    def __init__(self, config: BunkerConfig):
+    def __init__(self, config: BunkerConfig, backend=None):
         self.config = config
         self.state = BunkerState.DESTROYED
         self.metrics = BunkerMetrics()
@@ -96,6 +96,16 @@ class Bunker:
 
         # Secrets management — store guest password in Credential Manager
         self._secrets = SecretManager()
+        # Hypervisor backend — Strategy pattern
+        if backend is not None:
+            self.backend = backend
+        else:
+            try:
+                from .hypervisor import get_backend
+                self.backend = get_backend()
+            except Exception:
+                from .hypervisor.mock_backend import MockBackend
+                self.backend = MockBackend()
         if self.config.guest_password:
             self._secrets.store_secret("guest_password", self.config.guest_password)
             self.config.guest_password = ""  # clear plaintext from config
@@ -174,10 +184,8 @@ class Bunker:
             self._allocate_resources()
             self._initialize_integrity_baseline()
 
-            # Enable Guest Service Interface after VM creation
             if self._vm_name:
-                from .hyperv_client import enable_guest_integration
-                enable_guest_integration(self._vm_name)
+                self.backend.enable_guest_integration(self._vm_name)
 
             # Propagate VM credentials to security layers
             self._propagate_vm_credentials()
@@ -189,22 +197,24 @@ class Bunker:
         except Exception as e:
             logger.error(f"Error inicializando bunker: {e}")
             self._cleanup_on_failure()
-            self.transition_to(BunkerState.ERROR)
+            if self.state != BunkerState.ERROR:
+                try:
+                    self.transition_to(BunkerState.ERROR)
+                except Exception: pass
             return False
 
     def _cleanup_on_failure(self):
         """Remove Hyper-V resources created during a failed initialize()."""
-        from .hyperv_client import remove_vm, remove_switch
         if self._vm_name:
             try:
-                remove_vm(self._vm_name, force=True)
+                self.backend.remove_vm(self._vm_name, force=True)
                 logger.info("Cleaned up VM %s after init failure", self._vm_name)
             except Exception as exc:
                 logger.warning("Failed to clean up VM %s: %s", self._vm_name, exc)
             self._vm_name = None
         if self._switch_name:
             try:
-                remove_switch(self._switch_name)
+                self.backend.remove_switch(self._switch_name)
                 logger.info("Cleaned up switch %s after init failure", self._switch_name)
             except Exception as exc:
                 logger.warning("Failed to clean up switch %s: %s", self._switch_name, exc)
@@ -242,7 +252,10 @@ class Bunker:
 
         except Exception as e:
             logger.error(f"Error activando bunker: {e}")
-            self.transition_to(BunkerState.ERROR)
+            if self.state != BunkerState.ERROR:
+                try:
+                    self.transition_to(BunkerState.ERROR)
+                except Exception: pass
             return False
 
     def terminate(self) -> bool:
@@ -372,26 +385,21 @@ class Bunker:
     # --- Private initialisation helpers ---
 
     def _verify_system_requirements(self):
-        from .hyperv_client import check_hyper_v_available
-        if not check_hyper_v_available():
-            raise SystemError("Hyper-V is not available on this host")
-        logger.info("Hyper-V verified")
+        if not self.backend.check_available():
+            raise SystemError("Hyper-V/KVM is not available on this host")
+        logger.info("Hyper-V/KVM verified via %s", type(self.backend).__name__)
 
     def _load_base_image(self):
         """Load or create the base image for this bunker."""
-        # For now: create a fresh VM (no base image template yet)
-        # TODO(scenario-B phase 3): use pre-built golden image template
-        from .hyperv_client import create_internal_switch
         self._switch_name = f"lumenos_{self.config.id}_switch"
-        create_internal_switch(self._switch_name)
+        self.backend.create_internal_switch(self._switch_name)
 
     def _allocate_resources(self):
-        from .hyperv_client import create_vm
         from pathlib import Path
         vm_name = f"bunker_{self.config.id}"
         diff_vhd = str(Path("snapshots") / f"{self.config.id}_system.vhdx")
         Path("snapshots").mkdir(parents=True, exist_ok=True)
-        success = create_vm(
+        success = self.backend.create_vm(
             vm_name=vm_name,
             memory_mb=self.config.memory_mb,
             cpu_cores=self.config.cpu_cores,
@@ -443,15 +451,13 @@ class Bunker:
     # --- Private termination helpers ---
 
     def _capture_forensic_snapshot(self):
-        from .hyperv_client import create_checkpoint
         if self._vm_name:
             snapshot_name = f"forensic_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            create_checkpoint(self._vm_name, snapshot_name)
+            self.backend.create_checkpoint(self._vm_name, snapshot_name)
 
     def _terminate_processes(self):
-        from .hyperv_client import stop_vm
         if self._vm_name:
-            stop_vm(self._vm_name, force=True)
+            self.backend.stop_vm(self._vm_name, force=True)
 
     def _disconnect_network(self):
         # Decontamination handles full switch cleanup

@@ -49,33 +49,71 @@ class SecretManager:
 
     # -- OS credential store (keyring) ----------------------------------
 
+    def _fallback_path(self):
+        from pathlib import Path
+        return Path.home() / ".config" / "lumenos" / "secrets.json"
+    def _file_store(self, name: str, value: str):
+        import json, os
+        fp = self._fallback_path()
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if fp.exists():
+            try: data = json.loads(fp.read_text())
+            except: data = {}
+        data[f"{self.service_name}/{name}"] = value
+        fp.write_text(json.dumps(data))
+        try: os.chmod(fp, 0o600)
+        except: pass
+    def _file_get(self, name: str):
+        import json
+        fp = self._fallback_path()
+        if not fp.exists(): return None
+        try: return json.loads(fp.read_text()).get(f"{self.service_name}/{name}")
+        except: return None
+    def _file_delete(self, name: str):
+        import json
+        fp = self._fallback_path()
+        if not fp.exists(): return False
+        try:
+            data = json.loads(fp.read_text())
+            k = f"{self.service_name}/{name}"
+            if k in data: del data[k]; fp.write_text(json.dumps(data)); return True
+        except: pass
+        return False
     def store_secret(self, name: str, value: str) -> None:
-        """Store a secret in Windows Credential Manager via keyring."""
-        import keyring
-
-        keyring.set_password(self.service_name, name, value)
-        logger.debug("Secret stored: %s/%s", self.service_name, name)
+        try:
+            import keyring
+            keyring.set_password(self.service_name, name, value)
+            logger.debug("Secret stored: %s/%s", self.service_name, name)
+            return
+        except Exception as e:
+            logger.debug("keyring store failed, fallback file: %s", e)
+        self._file_store(name, value)
 
     def get_secret(self, name: str) -> Optional[str]:
-        """Retrieve a secret from Windows Credential Manager. Returns None if absent."""
-        import keyring
-
-        value = keyring.get_password(self.service_name, name)
-        if value is None:
-            logger.debug("Secret not found: %s/%s", self.service_name, name)
-        return value
+        try:
+            import keyring
+            value = keyring.get_password(self.service_name, name)
+            if value is not None: return value
+        except Exception as e:
+            logger.debug("keyring get failed: %s", e)
+        v = self._file_get(name)
+        if v is None: logger.debug("Secret not found: %s/%s", self.service_name, name)
+        return v
 
     def delete_secret(self, name: str) -> bool:
-        """Remove a secret from Windows Credential Manager. Returns True if deleted."""
-        import keyring
-
         try:
-            keyring.delete_password(self.service_name, name)
-            logger.debug("Secret deleted: %s/%s", self.service_name, name)
-            return True
-        except keyring.errors.PasswordDeleteError:
-            logger.debug("Secret not found for deletion: %s/%s", self.service_name, name)
-            return False
+            import keyring
+            try:
+                keyring.delete_password(self.service_name, name)
+                logger.debug("Secret deleted: %s/%s", self.service_name, name)
+                return True
+            except keyring.errors.PasswordDeleteError:
+                pass
+        except Exception: pass
+        if self._file_delete(name): return True
+        logger.debug("Secret not found for deletion: %s/%s", self.service_name, name)
+        return False
 
     # -- Key generation -------------------------------------------------
 

@@ -85,6 +85,7 @@ from .image_builder import ImageBuilder, VMImage, ImageLayer, ImageType, ImageSt
 from .package_engine import PackageEngine, PackageManifest, PackageLayer, PackageFlag
 from .analysis_agent import AnalysisAgent, AnalysisReport, AgentStatus, MonitorType
 from .multi_host import MultiHostManager, HostNode, HostRole, HostStatus, ClusterConfig
+from .platform import detect_hypervisor, HypervisorType, is_windows, is_linux, has_kvm, has_libvirt
 from .phone_support import PhoneSupport, DeviceCapabilities, PhoneVMConfig, DevicePlatform, HypervisorType
 
 __all__ = [
@@ -166,6 +167,13 @@ __all__ = [
     "HostRole",
     "HostStatus",
     "ClusterConfig",
+    # Platform
+    "detect_hypervisor",
+    "HypervisorType",
+    "is_windows",
+    "is_linux",
+    "has_kvm",
+    "has_libvirt",
     # Phone Support
     "PhoneSupport",
     "DeviceCapabilities",

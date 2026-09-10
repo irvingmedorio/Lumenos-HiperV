@@ -41,7 +41,8 @@ class SecurityLayerBase(ABC):
         layer: SecurityLayer,
         bunker_id: str,
         failure_probabilities: Optional[Dict[SecurityLayer, float]] = None,
-    ):
+            backend=None,
+        ):
         self.layer = layer
         self.bunker_id = bunker_id
         self.active = False
@@ -149,8 +150,10 @@ class NetworkSecurityLayer(SecurityLayerBase):
         bunker_id: str,
         failure_probabilities: Optional[Dict[SecurityLayer, float]] = None,
         allow_dns: bool = False,
+            backend=None,
+        
     ):
-        super().__init__(SecurityLayer.NETWORK, bunker_id, failure_probabilities)
+        super().__init__(SecurityLayer.NETWORK, bunker_id, failure_probabilities, backend)
         self.blocked_connections = 0
         self.blocked_dns_queries = 0
         self.interfaces_disabled = []
@@ -191,8 +194,10 @@ class FilesystemSecurityLayer(SecurityLayerBase):
         self,
         bunker_id: str,
         failure_probabilities: Optional[Dict[SecurityLayer, float]] = None,
+            backend=None,
+        
     ):
-        super().__init__(SecurityLayer.FILESYSTEM, bunker_id, failure_probabilities)
+        super().__init__(SecurityLayer.FILESYSTEM, bunker_id, failure_probabilities, backend)
         self.differential_disk_path = ""
         self.files_blocked = 0
         self.persistence_attempts_blocked = 0
@@ -240,8 +245,10 @@ class ProcessSecurityLayer(SecurityLayerBase):
         self,
         bunker_id: str,
         failure_probabilities: Optional[Dict[SecurityLayer, float]] = None,
+            backend=None,
+        
     ):
-        super().__init__(SecurityLayer.PROCESS, bunker_id, failure_probabilities)
+        super().__init__(SecurityLayer.PROCESS, bunker_id, failure_probabilities, backend)
         self.processes_terminated = 0
         self.injection_attempts_blocked = 0
         self.whitelist_enabled = True
@@ -279,8 +286,10 @@ class MemorySecurityLayer(SecurityLayerBase):
         self,
         bunker_id: str,
         failure_probabilities: Optional[Dict[SecurityLayer, float]] = None,
+            backend=None,
+        
     ):
-        super().__init__(SecurityLayer.MEMORY, bunker_id, failure_probabilities)
+        super().__init__(SecurityLayer.MEMORY, bunker_id, failure_probabilities, backend)
         self.memory_encrypted = False
         self.pages_verified = 0
         self.manipulation_attempts = 0
@@ -313,8 +322,10 @@ class HypervisorSecurityLayer(SecurityLayerBase):
         self,
         bunker_id: str,
         failure_probabilities: Optional[Dict[SecurityLayer, float]] = None,
+            backend=None,
+        
     ):
-        super().__init__(SecurityLayer.HYPERVISOR, bunker_id, failure_probabilities)
+        super().__init__(SecurityLayer.HYPERVISOR, bunker_id, failure_probabilities, backend)
         self.secure_boot_active = False
         self.tpm_verified = False
         self.nested_virtualization = False

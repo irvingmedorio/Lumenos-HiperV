@@ -150,7 +150,7 @@ class SecurityMonitor:
         ]
     }
 
-    def __init__(self, bunker_id: str, *, metrics=None, monitor_interval: float = 5.0):
+    def __init__(self, bunker_id: str, *, metrics=None, monitor_interval: float = 5.0, backend=None):
         self.bunker_id = bunker_id
         self.events: List[SecurityEvent] = []
         self.escape_attempts: List[EscapeAttemptType] = []

@@ -102,6 +102,24 @@ lumenos_sandbox/
 pip install -e ".[dev]"
 ```
 
+### Verificar Hyper-V (Windows)
+
+```powershell
+(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All).State
+```
+
+### Requisitos Linux (KVM/QEMU)
+
+```bash
+sudo apt update && sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients virtinst qemu-utils
+sudo usermod -aG libvirt $USER && sudo usermod -aG kvm $USER
+# Verificar
+./scripts/check_env.sh
+# Seleccionar backend explícito
+LUMENOS_HYPERVISOR=kvm lumenos status   # kvm | hyperv | mock
+LUMENOS_HYPERVISOR=mock python -m pytest tests/ -v  # CI sin hypervisor
+```
+
 ### Verificar Hyper-V
 
 ```powershell
