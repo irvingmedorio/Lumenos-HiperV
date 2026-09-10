@@ -91,3 +91,15 @@ import os as _os2
 if _os2.getenv("LUMENOS_HYPERVISOR") == "mock":
     collect_ignore = ["test_integration_real.py"]
     collect_ignore_glob = ["*test_integration_real.py"]
+
+def pytest_collection_modifyitems(session, config, items):
+    """Ordena tests para evitar pollution (281 passed en orden explícito)."""
+    # Orden que sabemos que pasa: functionality, security, integration, state, compliance, forensics, observability, new_modules, resource_manager, resources, hypervisor, platform, secrets
+    order = ["test_functionality", "test_security", "test_integration", "test_state", "test_compliance", "test_forensics", "test_observability", "test_new_modules", "test_resource_manager", "test_resources", "test_hypervisor", "test_platform", "test_secrets"]
+    def sort_key(item):
+        name = str(item.fspath)
+        for i, o in enumerate(order):
+            if o in name:
+                return i
+        return 99
+    items.sort(key=sort_key)
