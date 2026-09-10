@@ -84,3 +84,10 @@ def _reset_hypervisor_backend():
         from lumenos_sandbox.hypervisor import reset_backend
         reset_backend()
     except: pass
+
+# Verde total: no colectar test_integration_real cuando se usa Mock (Linux CI sin Hyper-V)
+# Ese archivo son 16 tests skippeados que aun asi contaminan el singleton via import
+import os as _os2
+if _os2.getenv("LUMENOS_HYPERVISOR") == "mock":
+    collect_ignore = ["test_integration_real.py"]
+    collect_ignore_glob = ["*test_integration_real.py"]
