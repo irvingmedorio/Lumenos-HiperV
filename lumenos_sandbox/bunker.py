@@ -138,6 +138,8 @@ class Bunker:
         Lanza InvalidStateTransition si la transición no es válida.
         """
         with self._lock:
+            if new_state == self.state:
+                return False
             if new_state not in VALID_STATE_TRANSITIONS.get(self.state, []):
                 raise InvalidStateTransition(
                     f"Transición inválida: {self.state.name} -> {new_state.name}"
@@ -250,12 +252,17 @@ class Bunker:
             logger.info(f"Bunker {self.config.id} activado exitosamente")
             return True
 
+        except InvalidStateTransition:
+            raise
         except Exception as e:
             logger.error(f"Error activando bunker: {e}")
             if self.state != BunkerState.ERROR:
                 try:
                     self.transition_to(BunkerState.ERROR)
-                except Exception: pass
+                except InvalidStateTransition:
+                    raise
+                except Exception:
+                    pass
             return False
 
     def terminate(self) -> bool:

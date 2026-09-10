@@ -56,12 +56,30 @@ BACKEND_MOCKS = {
 
 import pytest
 @pytest.fixture(autouse=True)
+def _temp_state_store(tmp_path):
+    """Aisla DB por test para evitar colisiones de IDs (escape_test, etc.)"""
+    from lumenos_sandbox.bunker import set_state_store
+    from lumenos_sandbox.state import BunkerStateStore
+    store = BunkerStateStore(db_path=str(tmp_path / "test.db"))
+    set_state_store(store)
+    yield
+    try: store.close()
+    except: pass
+    from lumenos_sandbox.bunker import set_state_store as _s
+    from lumenos_sandbox.state import BunkerStateStore as _B
+    _s(_B())
+
+@pytest.fixture(autouse=True)
 def _reset_hypervisor_backend():
     try:
         from lumenos_sandbox.hypervisor import reset_backend
         reset_backend()
     except: pass
     yield
+    try:
+        from unittest.mock import patch
+        patch.stopall()
+    except: pass
     try:
         from lumenos_sandbox.hypervisor import reset_backend
         reset_backend()

@@ -1,0 +1,1 @@
+When executing tool calls via OpenCode bridge, strictly format them using <pi_tool_call>{"name":"tool_name","arguments":{...}}</pi_tool_call>. Do not output raw JSON, XML, or native OpenCode tool markers like arg_key.
