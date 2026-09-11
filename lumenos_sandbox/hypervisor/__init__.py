@@ -44,7 +44,8 @@ def get_backend() -> HypervisorBackend:
         if has_kvm() or has_libvirt() or has_qemu():
             from .kvm_backend import KvmBackend
             _backend = KvmBackend()
-            return _backend
+            if _backend.check_available():
+                return _backend
     except Exception:
         pass
     from .mock_backend import MockBackend

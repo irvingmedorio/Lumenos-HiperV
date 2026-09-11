@@ -45,8 +45,7 @@ def detect_hypervisor() -> HypervisorType:
         return HypervisorType.KVM
     if is_windows():
         return HypervisorType.HYPERV
-    if has_kvm() or has_libvirt():
-        return HypervisorType.KVM
-    if has_qemu():
+    # KVM needs the hardware AND the toolchain that actually operates it.
+    if has_kvm() and has_libvirt() and has_qemu():
         return HypervisorType.KVM
     return HypervisorType.MOCK

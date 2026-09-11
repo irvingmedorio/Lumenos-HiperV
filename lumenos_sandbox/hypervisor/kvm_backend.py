@@ -20,12 +20,13 @@ class KvmBackend(HypervisorBackend):
     def _run_virsh(self, args: str, timeout=30):
         return self._run(["virsh"] + args.split(), timeout)
     def check_available(self) -> bool:
-        if Path("/dev/kvm").exists(): return True
-        if shutil.which("virsh"):
-            ok, _, _ = self._run(["virsh","--version"], timeout=5)
-            if ok: return True
-        if shutil.which("qemu-img"): return True
-        return False
+        # /dev/kvm alone is not enough: virsh is required to operate VMs,
+        # qemu-img to create disks. Without both, degrade to Mock instead of
+        # selecting KVM and failing at runtime.
+        if not shutil.which("virsh") or not shutil.which("qemu-img"):
+            return False
+        ok, _, _ = self._run(["virsh","--version"], timeout=5)
+        return ok
     def get_vm_status(self, vm_name: str) -> Optional[str]:
         ok, out, _ = self._run(["virsh","domstate", vm_name], timeout=10)
         if ok and out: return out
