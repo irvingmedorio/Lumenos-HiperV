@@ -23,15 +23,23 @@
 
 | Componente | Requisito mínimo |
 |---|---|
-| **SO** | Windows Server 2019/2022 o Windows 10/11 Pro/Enterprise |
-| **Edición** | Pro o superior (Hyper-V no disponible en Home) |
+| **SO** | Windows Server 2019/2022, Windows 10/11 Pro/Enterprise, **o Linux** (Ubuntu 20.04+ / Fedora 36+ / Arch) |
+| **Edición** | Windows Pro o superior (Hyper-V no disponible en Home) |
 | **Arquitectura** | x64 (AMD64) |
-| **PowerShell** | 5.1+ (incluido) o PowerShell 7+ (recomendado) |
+| **PowerShell** | 5.1+ (incluido) o PowerShell 7+ (recomendado) — solo Windows |
 | **Python** | 3.11+ |
 
-### 1.2 Hyper-V
+### 1.2 Hypervisor
 
-Hyper-V **es obligatorio**. El sandbox crea y gestiona VMs reales a través del hypervisor del host.
+El sandbox crea y gestiona VMs reales a través del hypervisor del host. Se soportan **tres backends**:
+
+| Backend | Plataforma | Requisitos |
+|---|---|---|
+| **Hyper-V** | Windows | Hyper-V habilitado |
+| **KVM/QEMU** | Linux | `/dev/kvm`, `virsh`, `qemu-img` — instalar con `lumenos setup-linux` |
+| **Mock** | cualquier | Ninguno (para tests/CI) |
+
+La selección es automática: Windows → Hyper-V, Linux con toolchain → KVM, y degrada a Mock si falta algo. Override con `LUMENOS_HYPERVISOR=kvm|hyperv|mock`.
 
 ```powershell
 # Verificar estado actual
@@ -84,18 +92,31 @@ pip install lumenos-sandbox[analysis]
 
 ```bash
 git clone <repositorio>
-cd lumenos_windows_sandbox
+cd Lumenos-HiperV
 pip install -e ".[dev,analysis]"
 ```
 
-### 2.3 Verificación Post-Instalación
+### 2.3 Instalar dependencias del hipervisor
+
+**Linux** — instala qemu-kvm, libvirt, virtinst y configura grupos automáticamente:
 
 ```bash
-# Verificar que Hyper-V está disponible
-lumenos status
+lumenos setup-linux   # requiere sudo
+# Logout/login o reboot para que los grupos libvirt/kvm tengan efecto
+```
 
-# Verificar salud del sistema
-lumenos health
+**Windows** — habilitar Hyper-V:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All
+Restart-Computer
+```
+
+### 2.4 Verificación Post-Instalación
+
+```bash
+lumenos status     # debe mostrar Hyper-V: [OK] o KVM: [OK]
+lumenos health     # verificar salud del sistema
 ```
 
 ### 2.4 Configuración Inicial
@@ -246,6 +267,34 @@ Set-VMHost -EnableEnhancedSessionMode $true
 ```
 
 > **Nota**: El sandbox verifica automáticamente el estado de VBS y Secure Boot dentro del guest via `check_guest_vbs_status()`. Si están deshabilitados, genera eventos de severidad MEDIUM.
+
+### 3.6 Hardening de Linux (KVM)
+
+```bash
+# Verificar virtualización por hardware
+egrep -c '(vmx|svm)' /proc/cpuinfo   # > 0 = OK
+
+# Deshabilitar servicios innecesarios
+sudo systemctl disable --now cups bluetooth avahi-daemon 2>/dev/null || true
+
+# Firewall: bloquear entrada por defecto, solo management
+sudo ufw default deny incoming
+sudo ufw allow from 10.0.0.0/24 to any port 5985,5986 proto tcp 2>/dev/null || true
+sudo ufw allow 8080/tcp
+sudo ufw enable
+
+# Aislamiento de red del guest — los switches libvirt son internos por defecto
+# (virbr-* bridges, sin salida a Internet a menos que se configure NAT)
+
+# Cuenta de servicio dedicada
+sudo useradd -r -s /usr/sbin/nologin svc_lumenos
+sudo usermod -aG libvirt,kvm svc_lumenos
+
+# Auditoría de comandos (para el chain of custody en Linux)
+sudo auditctl -a always,exit -F arch=b64 -S execve -k lumenos_exec
+```
+
+> **Nota**: KVM usa `qemu-guest-agent` para interactuar con el guest (`virsh qemu-agent-command`). Si el guest no lo tiene instalado, `execute_in_guest()` degrada a `BackendResult(False)` sin crashear — el resto del ciclo de vida funciona igual.
 
 ---
 
@@ -405,6 +454,16 @@ $trigger = New-ScheduledTaskTrigger -Daily -At "02:00AM"
 Register-ScheduledTask -TaskName "LUMENOS-Backup" -Action $action -Trigger $trigger
 ```
 
+**Linux** — con cron o systemd timer:
+
+```bash
+# Cron diario a las 02:00
+echo '0 2 * * * idm cp /var/lib/lumenos/lumenos_state.db /var/backups/lumenos_state_$(date +\%Y\%m\%d).db' \
+  | sudo tee /etc/cron.d/lumenos-backup
+```
+
+> **Nota**: En Linux las VMs huérfanas se listan con `virsh list --all` y se eliminan con `virsh undefine --remove-all-storage <name>`.
+
 ### 6.2 Persistencia de Estado
 
 El estado se persiste en SQLite con el siguiente esquema:
@@ -503,7 +562,8 @@ Get-ChildItem "D:\VMs\LUMENOS-<bunker_id>*" | Remove-Item -Force
 
 | Comando | Descripción |
 |---|---|
-| `lumenos status` | Verificar Hyper-V y prerequisitos |
+| `lumenos status` | Verificar hipervisor y prerequisitos |
+| `lumenos setup-linux` | Instalar dependencias KVM (Linux) |
 | `lumenos start --id X --name Y` | Iniciar sesión de análisis |
 | `lumenos stop --id X` | Terminar y descontaminar sesión |
 | `lumenos analyze --id X --sample Y` | Ejecutar muestra en el sandbox |
@@ -518,7 +578,8 @@ Get-ChildItem "D:\VMs\LUMENOS-<bunker_id>*" | Remove-Item -Force
 
 ## Seguridad — Checklist de Despliegue
 
-- [ ] Hyper-V habilitado y funcionando
+- [ ] Hypervisor disponible: `lumenos status` muestra `[OK]` (Hyper-V **o** KVM)
+- [ ] Linux: `lumenos setup-linux` ejecutado y `/dev/kvm` presente
 - [ ] Firewall del host configurado (bloqueo por defecto)
 - [ ] Servicios innecesarios deshabilitados
 - [ ] Cuenta de servicio dedicada creada

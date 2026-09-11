@@ -93,8 +93,8 @@ lumenos_sandbox/
 ### Requisitos
 
 - **Python** ≥ 3.11
-- **Hyper-V** habilitado (para VMs reales)
-- **Windows** 10 21H2+ / 11 / Server 2022
+- **Windows** 10 21H2+ / 11 / Server 2022 **con Hyper-V habilitado**, o
+- **Linux** (Ubuntu 20.04+ / Fedora 36+ / Arch) con virtualización por hardware
 
 ### Instalar
 
@@ -102,28 +102,33 @@ lumenos_sandbox/
 pip install -e ".[dev]"
 ```
 
-### Verificar Hyper-V (Windows)
-
-```powershell
-(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All).State
-```
-
-### Requisitos Linux (KVM/QEMU)
+### Configurar hipervisor
 
 ```bash
-sudo apt update && sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients virtinst qemu-utils
-sudo usermod -aG libvirt $USER && sudo usermod -aG kvm $USER
-# Verificar
-./scripts/check_env.sh
-# Seleccionar backend explícito
+# Verificar estado
+lumenos status
+
+# Linux: instalar dependencias KVM/QEMU/libvirt (con sudo)
+lumenos setup-linux
+
+# Verificar de nuevo
+lumenos status
+
+# Windows: habilitar Hyper-V
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All
+# (requiere reinicio)
+
+# Seleccionar backend explícito (override)
 LUMENOS_HYPERVISOR=kvm lumenos status   # kvm | hyperv | mock
-LUMENOS_HYPERVISOR=mock python -m pytest tests/ -v  # CI sin hypervisor
+
+# CI sin hipervisor
+LUMENOS_HYPERVISOR=mock python -m pytest tests/ -v
 ```
 
-### Verificar Hyper-V
+### Verificar entorno (opcional)
 
-```powershell
-(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All).State
+```bash
+./scripts/check_env.sh     # Linux
 ```
 
 ---
@@ -135,6 +140,9 @@ LUMENOS_HYPERVISOR=mock python -m pytest tests/ -v  # CI sin hypervisor
 ```bash
 # Verificar sistema
 lumenos status
+
+# Instalar dependencias Linux (con sudo)
+lumenos setup-linux
 
 # Iniciar sandbox
 lumenos start --id sandbox1 --name "Análisis" --memory 8192 --cpus 4
@@ -239,15 +247,21 @@ python -m pytest tests/test_integration_real.py -v
 
 | Archivo | Tests | Descripción |
 |---------|-------|-------------|
-| `test_functionality.py` | 50 | Funcionamiento correcto |
-| `test_security.py` | 39 | Resistencia a ataques |
+| `test_functionality.py` | 53 | Funcionamiento correcto |
+| `test_security.py` | 36 | Resistencia a ataques |
 | `test_integration.py` | 39 | Ciclo de vida completo (mocked) |
-| `test_integration_real.py` | 16 | Hyper-V real (skip si no disponible) |
+| `test_integration_real.py` | 17 | Hyper-V/KVM real (skip si no disponible) |
 | `test_state.py` | 13 | SQLite persistence |
 | `test_observability.py` | 14 | JSON logging, metrics, health |
-| `test_forensics.py` | 10 | Evidencia forense |
+| `test_forensics.py` | 13 | Evidencia forense |
 | `test_compliance.py` | 9 | Controles de compliance |
-| **Total** | **174+16** | **174 passed, 16 skipped** |
+| `test_platform.py` | 5 | Detección cross-platform |
+| `test_hypervisor_backends.py` | 4 | Backends KVM/Mock/factory |
+| `test_secrets_store.py` | 1 | Secrets fallback |
+| `test_resources.py` | 29 | Image builder, recursos |
+| `test_new_modules.py` | 19 | Módulos nuevos |
+| `test_resource_manager.py` | 47 | Resource manager |
+| **Total** | **282** | **282 passed, 16 skipped (sin hipervisor)** |
 
 ---
 
