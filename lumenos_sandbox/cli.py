@@ -81,6 +81,9 @@ def main():
     api_parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
     api_parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
 
+    # lumenos-sandbox setup-linux
+    subparsers.add_parser("setup-linux", help="Install KVM/QEMU/libvirt dependencies on Linux")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -105,6 +108,7 @@ def main():
         "compliance": cmd_compliance,
         "evidence": cmd_evidence,
         "api": cmd_api,
+        "setup-linux": cmd_setup_linux,
     }
 
     try:
@@ -125,11 +129,37 @@ def cmd_status(_args=None):
         if not avail:
             print("  -> Enable Hyper-V: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All")
     elif hv == HypervisorType.KVM:
-        print(f"KVM: {'[OK] Available (virsh/qemu-img)' if avail else '[FAIL] Not available — install qemu-kvm libvirt-daemon-system virtinst'}")
+        print(f"KVM: {'[OK] Available (virsh/qemu-img)' if avail else '[FAIL] Not available — run: lumenos setup-linux'}")
     else:
         print(f"Mock: {'[WARN] No hypervisor detected — using MockBackend' if not avail else '[OK] Mock active'}")
-        print("  -> Hint: set LUMENOS_HYPERVISOR=kvm|hyperv|mock to override")
+        print("  -> Hint: run `lumenos setup-linux` to install KVM dependencies, or set LUMENOS_HYPERVISOR=kvm|hyperv|mock")
     return 0 if avail else 1
+
+
+def cmd_setup_linux(_args=None):
+    import subprocess
+    from pathlib import Path
+
+    if sys.platform != "linux":
+        print("[SKIP] setup-linux is only available on Linux")
+        return 0
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "install_kvm_deps.sh"
+    if not script.exists():
+        # Fallback: inline hint if script is not bundled
+        print("[SETUP] Install KVM dependencies:")
+        print("  sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients virtinst qemu-utils")
+        print("  sudo usermod -aG libvirt,kvm $USER")
+        print("  logout/login or reboot for group changes")
+        return 1
+
+    print(f"[SETUP] Running {script.name} ...")
+    try:
+        result = subprocess.run(["bash", str(script)], timeout=300)
+        return result.returncode
+    except FileNotFoundError:
+        print("[FAIL] bash not found — install manually")
+        return 1
 
 
 def cmd_start(args):

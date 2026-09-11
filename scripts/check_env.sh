@@ -8,4 +8,14 @@ echo "[KVM]"; if [ -e /dev/kvm ]; then echo "  OK: /dev/kvm exists"; ls -l /dev/
 echo "[libvirt]"; if command -v virsh >/dev/null 2>&1; then virsh --version && echo "  OK: virsh available"; else echo "  WARN: virsh not found — install libvirt-clients"; fi
 echo "[qemu-img]"; if command -v qemu-img >/dev/null 2>&1; then qemu-img --version | head -n1; echo "  OK: qemu-img available"; else echo "  WARN: qemu-img not found — install qemu-utils"; fi
 echo "[kvm module]"; lsmod | grep -i kvm || echo "  (no kvm module loaded)"
+# ── Missing toolchain? Offer install ──────────────────────────────
+MISSING=""
+if ! command -v virsh >/dev/null 2>&1; then MISSING="$MISSING virsh"; fi
+if ! command -v qemu-img >/dev/null 2>&1; then MISSING="$MISSING qemu-img"; fi
+if [ -n "$MISSING" ]; then
+    echo ""
+    echo "[SETUP] Missing:$MISSING"
+    echo "  Install now:  bash scripts/install_kvm_deps.sh"
+    echo "  Or manually:  sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients virtinst qemu-utils"
+fi
 echo "=== CHECK COMPLETE ==="
