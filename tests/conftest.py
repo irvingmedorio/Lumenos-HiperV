@@ -1,5 +1,6 @@
 """Shared test fixtures and markers for LumenOS Sandbox tests."""
 
+import os
 import subprocess
 import pytest
 from unittest.mock import patch, MagicMock
@@ -75,6 +76,15 @@ def _reset_hypervisor_backend():
         from lumenos_sandbox.hypervisor import reset_backend
         reset_backend()
     except: pass
+    # Force Mock for unit tests unless the env var explicitly selects a real backend.
+    # Without this, a host with a real toolchain (e.g. KVM) makes get_backend()
+    # auto-detect and touch live VMs during unit tests.
+    if not os.getenv("LUMENOS_HYPERVISOR"):
+        try:
+            from lumenos_sandbox.hypervisor import set_backend
+            from lumenos_sandbox.hypervisor.mock_backend import MockBackend
+            set_backend(MockBackend())
+        except: pass
     yield
     try:
         from unittest.mock import patch
