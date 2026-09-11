@@ -71,6 +71,16 @@ def _temp_state_store(tmp_path):
     _s(_B())
 
 @pytest.fixture(autouse=True)
+def _fast_monitor(monkeypatch):
+    """Skip the 5-second join(5) in stop_monitoring — tests don't need it,
+    and it adds ~5s per terminate × ~44 tests ≈ 225s of suite time."""
+    import lumenos_sandbox.monitoring as mod
+    def _no_join_stop(self):
+        self._monitoring_active = False
+        # Daemon thread dies on process exit; no need to block
+    monkeypatch.setattr(mod.SecurityMonitor, "stop_monitoring", _no_join_stop)
+
+@pytest.fixture(autouse=True)
 def _reset_hypervisor_backend():
     try:
         from lumenos_sandbox.hypervisor import reset_backend
