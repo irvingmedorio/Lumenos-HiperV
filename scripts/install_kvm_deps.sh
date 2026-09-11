@@ -13,7 +13,7 @@ err()  { echo -e "${RED}[FAIL]${NC} $*" >&2; }
 # ── Packages required ──────────────────────────────────────────────
 APPS=(
     qemu-kvm
-    qemu-system-x86_64
+    qemu-system-x86
     qemu-utils
     libvirt-daemon-system
     libvirt-clients
@@ -38,14 +38,16 @@ echo "=== LUMENOS SANDBOX — KVM Dependency Installer ==="
 echo "Detected: $PKG"
 
 # ── Install packages ───────────────────────────────────────────────
+MAX_ATTEMPTS=3
+
 install_with_retries() {
-    local max=3 attempt=1
-    while (( attempt <= max )); do
-        if sudo apt-get update -qq && sudo apt-get install -y -qq "${APPS[@]}" 2>/dev/null; then
+    local attempt=1
+    while (( attempt <= MAX_ATTEMPTS )); do
+        if sudo apt-get update && sudo apt-get install -y "${APPS[@]}"; then
             log "Packages installed successfully via apt"
             return 0
         fi
-        warn "Attempt $attempt/$max failed, retrying in 3s..."
+        warn "Attempt $attempt/$MAX_ATTEMPTS failed, retrying in 3s..."
         sleep 3
         ((attempt++))
     done
@@ -57,12 +59,12 @@ case "$PKG" in
         if install_with_retries; then
             log "Packages installed"
         else
-            err "Failed to install packages after $max attempts"
+            err "Failed to install packages after $MAX_ATTEMPTS attempts"
             exit 1
         fi
         ;;
     dnf)
-        if sudo dnf install -y "${APPS[@]}" 2>/dev/null; then
+        if sudo dnf install -y "${APPS[@]}"; then
             log "Packages installed successfully via dnf"
         else
             err "Failed to install via dnf"
@@ -70,7 +72,7 @@ case "$PKG" in
         fi
         ;;
     pacman)
-        if sudo pacman -S --noconfirm --needed "${APPS[@]}" 2>/dev/null; then
+        if sudo pacman -S --noconfirm --needed "${APPS[@]}"; then
             log "Packages installed successfully via pacman"
         else
             err "Failed to install via pacman"
