@@ -4,10 +4,16 @@
 
 from __future__ import annotations
 
+import atexit
+import concurrent.futures
+import hmac
 import logging
+import os
+import threading
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .types import BunkerConfig, BunkerState
@@ -61,6 +67,59 @@ class MessageResponse(BaseModel):
     data: Optional[Dict[str, Any]] = None
 
 
+class AnalyzeSyncRequest(BaseModel):
+    """Payload for POST /analyze-sync (one-shot synchronous analysis)."""
+    sample_path: str = Field(..., description="Host-accessible path to the sample file")
+    monitor_seconds: float = Field(
+        5.0, ge=0, le=3600,
+        description="Bounded guest monitoring duration in seconds",
+    )
+    timeout_seconds: float = Field(
+        120.0, gt=0, le=3600,
+        description="Wall-clock cap for the whole cycle so a hung guest "
+                    "cannot hang the API forever",
+    )
+    execute_timeout: int = Field(
+        30, ge=1, le=600,
+        description="Per guest command timeout in seconds",
+    )
+
+
+# /analyze-sync executor and admission control.
+#
+# - The pool bounds concurrent *running* analyses at _ANALYSIS_MAX_IN_FLIGHT.
+#   The pool alone is not enough: concurrent.futures queues further
+#   submissions without limit and cannot cancel a future that already started,
+#   so without backpressure a few stuck guests would absorb every worker while
+#   later requests sat queued.
+# - _analysis_slots is the admission bound: a request that cannot take a slot
+#   is refused immediately with HTTP 503 instead of piling up in the queue.
+# - The worker receives timeout_seconds and analyze_sync enforces it as a
+#   cooperative deadline: it aborts the cycle between steps and still runs its
+#   decontamination ``finally`` before returning. The slot is released when
+#   the worker returns, so a deadline-aborted analysis restores capacity
+#   instead of occupying a worker forever.
+_ANALYSIS_MAX_IN_FLIGHT = 4
+
+# The caller waits longer than the worker's own deadline so the worker's clean
+# cooperative abort (structured error verdict) normally wins the race. The 504
+# is reserved for the residual non-interruptible tail (e.g. a backend call that
+# ignores the deadline); the margin gives the worker time to finish aborting
+# and decontaminating before the caller gives up.
+_ANALYSIS_TEARDOWN_MARGIN_SECONDS = 30
+
+_analysis_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_ANALYSIS_MAX_IN_FLIGHT, thread_name_prefix="inspect-sync"
+)
+_analysis_slots = threading.BoundedSemaphore(_ANALYSIS_MAX_IN_FLIGHT)
+
+# At interpreter exit, drop analyses that are still queued (cancel_futures
+# discards the pending submissions). This does NOT unblock an analysis that is
+# already running: concurrent.futures.thread joins its worker threads at
+# shutdown, so a stuck worker can still delay process exit.
+atexit.register(lambda: _analysis_executor.shutdown(wait=False, cancel_futures=True))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -85,6 +144,31 @@ def _get_bunker(bunker_id: str) -> Bunker:
     bunker._switch_name = state.get("switch_name")
     _bunkers[bunker_id] = bunker
     return bunker
+
+
+def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Path:
+    """Fail-closed auth + path confinement for ``POST /analyze-sync``.
+
+    Unconfigured token/root -> 503, bad token -> 401, sample outside
+    ``LUMENOS_SAMPLES_ROOT`` -> 403. Returns the resolved sample path.
+    """
+    expected = os.environ.get("LUMENOS_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="API token not configured")
+    scheme, _, presented = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not presented or not hmac.compare_digest(
+        presented.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
+
+    root_raw = os.environ.get("LUMENOS_SAMPLES_ROOT", "")
+    if not root_raw:
+        raise HTTPException(status_code=503, detail="Sample root not configured")
+    root = Path(root_raw).resolve()
+    candidate = Path(sample_path).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise HTTPException(status_code=403, detail="Sample path is outside the allowed root")
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +313,94 @@ def get_compliance():
     """Evaluate security controls and return compliance report."""
     report = ComplianceReport()
     return report.evaluate()
+
+
+@app.post("/analyze-sync")
+def analyze_sync_endpoint(
+    payload: AnalyzeSyncRequest, authorization: Optional[str] = Header(None)
+):
+    """Synchronous one-shot analysis for LUMENOS_Custom.
+
+    The caller does NOT manage bunkers: an ephemeral bunker is created
+    internally, the full inspect-file cycle runs (stage -> bunker lifecycle
+    -> execute + bounded monitor -> IOCs -> decontaminate), and the verdict
+    JSON is returned. ``timeout_seconds`` is forwarded to the worker as the
+    analysis's own cooperative deadline, so a cycle that outlives it aborts
+    between steps and returns a structured ``error`` verdict; the caller
+    additionally waits ``timeout_seconds + _ANALYSIS_TEARDOWN_MARGIN_SECONDS``
+    so that clean abort normally wins the race. Validation errors yield
+    400/422; a worker still running past that longer wait (an uninterruptible
+    backend call) yields 504; an exhausted admission budget yields 503.
+    """
+    resolved = _authorize_and_resolve(payload.sample_path, authorization)
+    if not resolved.is_file():
+        raise HTTPException(
+            status_code=400, detail=f"Sample not found: {payload.sample_path}"
+        )
+    # Downstream stages use the confined resolved path, not the raw input.
+    payload.sample_path = str(resolved)
+
+    # Admission bound: refuse instead of queueing without limit. The slot is
+    # held until the worker finishes, even when the caller has already given up.
+    if not _analysis_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Analysis capacity is full — retry shortly",
+        )
+    try:
+        future = _analysis_executor.submit(_run_analysis_and_release, payload)
+    except Exception:
+        _analysis_slots.release()
+        raise
+
+    caller_wait_seconds = payload.timeout_seconds + _ANALYSIS_TEARDOWN_MARGIN_SECONDS
+    try:
+        return future.result(timeout=caller_wait_seconds)
+    except concurrent.futures.TimeoutError:
+        logger.error(
+            "analyze-sync exceeded its %.1fs deadline plus %.1fs teardown "
+            "margin for %s (residual uninterruptible tail; decontamination "
+            "continues in background)",
+            payload.timeout_seconds, _ANALYSIS_TEARDOWN_MARGIN_SECONDS,
+            payload.sample_path,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail="Analysis timed out — bunker decontamination continues in background",
+        )
+    except Exception as exc:  # unexpected worker crash
+        logger.error("analyze-sync worker crashed for %s: %s", payload.sample_path, exc)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+
+
+def _run_analysis_and_release(payload: AnalyzeSyncRequest) -> Dict[str, Any]:
+    """Run one admitted analysis and always release its admission slot."""
+    try:
+        return _run_analysis(payload)
+    finally:
+        _analysis_slots.release()
+
+
+def _run_analysis(payload: AnalyzeSyncRequest) -> Dict[str, Any]:
+    """Run the inspect-file cycle for the endpoint (returns an error verdict
+    instead of raising, so a timed-out consumer still gets a report).
+
+    ``payload.timeout_seconds`` is forwarded as the analysis's own deadline;
+    a cycle that exhausts it aborts cooperatively (running decontamination)
+    and surfaces here as a structured ``error`` verdict.
+    """
+    from .inspect import analyze_sync, build_error_report
+
+    try:
+        return analyze_sync(
+            payload.sample_path,
+            monitor_seconds=payload.monitor_seconds,
+            execute_timeout=payload.execute_timeout,
+            timeout_seconds=payload.timeout_seconds,
+        )
+    except Exception as exc:
+        logger.error("analyze-sync analysis failed: %s", exc)
+        return build_error_report(payload.sample_path, exc)
 
 
 # ---------------------------------------------------------------------------

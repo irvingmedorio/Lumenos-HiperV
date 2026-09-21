@@ -343,12 +343,15 @@ class TestAnalyzeSyncAPI:
     """POST /analyze-sync — happy path, validation errors, timeout path."""
 
     @pytest.fixture(autouse=True)
-    def _client(self):
+    def _client(self, tmp_path, monkeypatch):
         pytest.importorskip("fastapi")
         from fastapi.testclient import TestClient
         from lumenos_sandbox.api import app
 
+        monkeypatch.setenv("LUMENOS_API_TOKEN", "test-token")
+        monkeypatch.setenv("LUMENOS_SAMPLES_ROOT", str(tmp_path))
         with TestClient(app) as client:
+            client.headers["Authorization"] = "Bearer test-token"
             yield client
 
     def test_endpoint_happy_path(self, _client, sample_file):
@@ -376,12 +379,16 @@ class TestAnalyzeSyncAPI:
         assert r.status_code == 422
 
     def test_endpoint_timeout_path(self, _client, sample_file, monkeypatch):
-        """A hung analysis must surface as 504, not hang the API."""
+        """A worker stuck in the uninterruptible tail must surface as 504, not
+        hang the API. The caller waits ``timeout_seconds`` plus the teardown
+        margin, so the test shortens that margin and keeps the hang just long
+        enough to outlive it — proving 504 is reserved for the residual tail."""
         import lumenos_sandbox.api as api_mod
 
+        monkeypatch.setattr(api_mod, "_ANALYSIS_TEARDOWN_MARGIN_SECONDS", 0.3)
+
         def hang(*args, **kwargs):
-            import time
-            time.sleep(30)
+            time.sleep(2)
             return {}
 
         monkeypatch.setattr(api_mod, "_run_analysis", hang)
@@ -395,16 +402,152 @@ class TestAnalyzeSyncAPI:
         )
         assert r.status_code == 504
 
+    def test_worker_receives_forwarded_deadline(self, _client, sample_file, monkeypatch):
+        """The endpoint must forward ``payload.timeout_seconds`` into the
+        analysis worker — not merely use it as the caller's wait cap."""
+        import lumenos_sandbox.inspect as inspect_mod
+
+        captured = {}
+
+        def spy(sample_path, *, monitor_seconds=5.0, execute_timeout=30,
+                timeout_seconds=None, **kwargs):
+            captured["timeout_seconds"] = timeout_seconds
+            captured["sample_path"] = sample_path
+            return {
+                "schema": INSPECT_SCHEMA,
+                "verdict": "clean",
+                "confidence": 1.0,
+                "score": 0,
+                "sample": {},
+                "iocs": [],
+                "chain_of_custody": {"hash": "", "valid": True},
+                "decontamination": {"success": True, "steps": []},
+                "bunker_id": "spy",
+                "duration_ms": 0,
+            }
+
+        monkeypatch.setattr(inspect_mod, "analyze_sync", spy)
+
+        r = _client.post(
+            "/analyze-sync",
+            json={
+                "sample_path": sample_file,
+                "monitor_seconds": 0,
+                "timeout_seconds": 7.5,
+            },
+        )
+
+        assert r.status_code == 200
+        assert captured["timeout_seconds"] == 7.5
+        assert captured["sample_path"] == sample_file
+
+    def test_endpoint_deadline_aborts_with_structured_error(self, _client, tmp_path):
+        """A request whose work outlives its deadline must abort on its own
+        deadline (cooperatively) and yield the structured error verdict
+        instead of hanging until the caller's wait expires."""
+        p = tmp_path / "slow.bin"
+        p.write_bytes(b"data")
+
+        started = time.monotonic()
+        r = _client.post(
+            "/analyze-sync",
+            json={
+                "sample_path": str(p),
+                "monitor_seconds": 30,
+                "timeout_seconds": 0.3,
+            },
+        )
+        elapsed = time.monotonic() - started
+
+        assert r.status_code == 200
+        assert r.json()["verdict"] == "error"
+        assert elapsed < 10, f"deadline was not honoured cooperatively: {elapsed:.1f}s"
+
+    def test_capacity_recovers_after_deadline_abort(self, _client, tmp_path, monkeypatch):
+        """R4-1 core criterion: an analysis that expires on its own deadline
+        while holding an admission slot must release that slot, so capacity is
+        restored and a subsequent request is admitted and executes (not 503)."""
+        import lumenos_sandbox.api as api_mod
+
+        # Single-slot pool: if the deadline-aborted worker leaked its slot,
+        # the follow-up request would be refused with 503.
+        monkeypatch.setattr(api_mod, "_analysis_slots", threading.BoundedSemaphore(1))
+
+        p = tmp_path / "slow.bin"
+        p.write_bytes(b"data")
+
+        first = _client.post(
+            "/analyze-sync",
+            json={
+                "sample_path": str(p),
+                "monitor_seconds": 30,
+                "timeout_seconds": 0.3,
+            },
+        )
+        assert first.status_code == 200
+        assert first.json()["verdict"] == "error"
+
+        # Observable recovery: capacity is available again.
+        second = _client.post(
+            "/analyze-sync",
+            json={"sample_path": str(p), "monitor_seconds": 0},
+        )
+        assert second.status_code == 200
+        assert second.json()["verdict"] == "clean"
+
+
+    # --- R1: bearer auth + sample-root confinement -------------------------
+
+    def test_auth_missing_token_is_401(self, _client, sample_file):
+        r = _client.post("/analyze-sync", headers={"Authorization": ""},
+                         json={"sample_path": sample_file, "monitor_seconds": 0})
+        assert r.status_code == 401
+
+    def test_auth_wrong_token_is_401(self, _client, sample_file):
+        r = _client.post("/analyze-sync", headers={"Authorization": "Bearer wrong"},
+                         json={"sample_path": sample_file, "monitor_seconds": 0})
+        assert r.status_code == 401
+
+    def test_auth_unconfigured_token_fails_closed_503(self, _client, sample_file, monkeypatch):
+        monkeypatch.delenv("LUMENOS_API_TOKEN", raising=False)
+        r = _client.post("/analyze-sync", headers={"Authorization": "Bearer test-token"},
+                         json={"sample_path": sample_file, "monitor_seconds": 0})
+        assert r.status_code == 503
+
+    def test_auth_sample_outside_root_is_403(self, _client, sample_file):
+        outside = Path(sample_file).parent.parent / "r1_outside.bin"
+        outside.write_bytes(b"x")
+        r = _client.post("/analyze-sync", headers={"Authorization": "Bearer test-token"},
+                         json={"sample_path": str(outside), "monitor_seconds": 0})
+        assert r.status_code == 403
+
+    def test_auth_sibling_prefix_dir_is_403(self, _client, tmp_path, monkeypatch):
+        # A `startswith` check would wrongly authorize "/…/samples-evil" under
+        # root "/…/samples"; the resolved-containment test must reject it.
+        root = tmp_path / "samples"; root.mkdir()
+        evil = tmp_path / "samples-evil"; evil.mkdir()
+        (evil / "p.bin").write_bytes(b"x")
+        monkeypatch.setenv("LUMENOS_SAMPLES_ROOT", str(root))
+        r = _client.post("/analyze-sync", headers={"Authorization": "Bearer test-token"},
+                         json={"sample_path": str(evil / "p.bin"), "monitor_seconds": 0})
+        assert r.status_code == 403
+
+    def test_auth_valid_token_in_root_succeeds(self, _client, sample_file):
+        r = _client.post("/analyze-sync", headers={"Authorization": "Bearer test-token"},
+                         json={"sample_path": sample_file, "monitor_seconds": 0})
+        assert r.status_code == 200 and r.json()["verdict"] == "clean"
+
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def _inspect_args(archivo, monitor_seconds=0.0, execute_timeout=30):
+def _inspect_args(archivo, monitor_seconds=0.0, execute_timeout=30, timeout_seconds=None):
     return argparse.Namespace(
         archivo=archivo,
         monitor_seconds=monitor_seconds,
         execute_timeout=execute_timeout,
+        timeout_seconds=timeout_seconds,
     )
 
 
