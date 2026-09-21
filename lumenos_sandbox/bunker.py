@@ -51,6 +51,14 @@ def set_state_store(store: BunkerStateStore) -> None:
     _state_store = store
 
 
+def _raise_if_deadline_exhausted(deadline: Optional[float]) -> None:
+    """Abort when the cycle deadline is spent; lazy import avoids a circular dep."""
+    if deadline is None or time.monotonic() < deadline:
+        return
+    from .inspect import AnalysisDeadlineExceeded
+    raise AnalysisDeadlineExceeded("analysis deadline exceeded during bunker initialization")
+
+
 class Bunker:
     """
     Bunker de aislamiento para pruebas de malware.
@@ -90,6 +98,10 @@ class Bunker:
 
         self._lock = threading.Lock()
         self._session_active = False
+
+        # Decontamination report from the last terminate() (used by
+        # inspect-file to report the actual decontamination steps)
+        self._decontamination_report = None
 
         # Per-bunker HMAC signing key for tamper-evident reports
         self._signing_key: str = secrets.token_hex(32)
@@ -175,21 +187,34 @@ class Bunker:
         except Exception as exc:
             logger.debug("Could not persist state for %s: %s", self.config.id, exc)
 
-    def initialize(self) -> bool:
-        """Inicializa el bunker desde cero."""
+    def initialize(self, deadline: Optional[float] = None) -> bool:
+        """Inicializa el bunker desde cero.
+
+        ``deadline`` (``time.monotonic()`` value; ``None`` keeps the previous
+        behaviour) is checked between the backend calls, whose fixed internal
+        timeouts the caller cannot interrupt. Exhaustion raises
+        ``AnalysisDeadlineExceeded`` (not swallowed) so decontamination runs.
+        """
+        from .inspect import AnalysisDeadlineExceeded
         try:
             self.transition_to(BunkerState.INITIALIZING)
             logger.info(f"Inicializando bunker {self.config.id}")
 
+            _raise_if_deadline_exhausted(deadline)
             self._verify_system_requirements()
+            _raise_if_deadline_exhausted(deadline)
             self._load_base_image()
+            _raise_if_deadline_exhausted(deadline)
             self._allocate_resources()
+            _raise_if_deadline_exhausted(deadline)
             self._initialize_integrity_baseline()
 
             if self._vm_name:
+                _raise_if_deadline_exhausted(deadline)
                 self.backend.enable_guest_integration(self._vm_name)
 
             # Propagate VM credentials to security layers
+            _raise_if_deadline_exhausted(deadline)
             self._propagate_vm_credentials()
 
             self.created_at = datetime.now()
@@ -203,6 +228,8 @@ class Bunker:
                 try:
                     self.transition_to(BunkerState.ERROR)
                 except Exception: pass
+            if isinstance(e, AnalysisDeadlineExceeded):
+                raise
             return False
 
     def _cleanup_on_failure(self):
@@ -309,6 +336,7 @@ class Bunker:
                 signing_key=self._signing_key,
             )
             report = runner.run()
+            self._decontamination_report = report
 
             # Transition based on report outcome
             if report.success:

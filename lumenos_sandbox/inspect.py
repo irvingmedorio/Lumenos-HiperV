@@ -36,6 +36,16 @@ logger = logging.getLogger("LUMENOS_SANDBOX")
 
 INSPECT_SCHEMA = "lumenos.inspect-report/v1"
 
+
+class AnalysisDeadlineExceeded(TimeoutError):
+    """Raised when the overall analysis deadline passes mid-cycle.
+
+    Subclasses :class:`TimeoutError` so callers that already handle timeouts
+    keep working. Raising (instead of returning early) is what lets the
+    cycle's ``finally`` decontamination run before the abort unwinds.
+    """
+
+
 _VALID_IOC_TYPES = {"file", "network", "process", "persistence", "registry", "memory"}
 _VALID_SEVERITIES = {"low", "medium", "high", "critical"}
 _SEVERITY_WEIGHTS = {"low": 1, "medium": 10, "high": 50, "critical": 100}
@@ -229,15 +239,89 @@ def build_error_report(sample_path, exc: Exception) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Cooperative deadline
+# ---------------------------------------------------------------------------
+
+def _remaining_seconds(deadline: Optional[float]) -> Optional[float]:
+    """Seconds left until ``deadline`` (``None`` when there is no deadline)."""
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _check_deadline(
+    deadline: Optional[float],
+    timeout_seconds: Optional[float],
+    checkpoint: str,
+) -> None:
+    """Raise if the overall deadline is exhausted; no-op without a deadline."""
+    remaining = _remaining_seconds(deadline)
+    if remaining is not None and remaining <= 0:
+        raise AnalysisDeadlineExceeded(
+            f"analysis deadline exceeded {checkpoint} "
+            f"(overall timeout_seconds={timeout_seconds})"
+        )
+
+
+def _effective_command_timeout(execute_timeout: int, deadline: Optional[float]) -> int:
+    """Per guest-command timeout reduced to the remaining budget.
+
+    Never below 1 second so the backend call still gets a usable timeout.
+    Without an overall deadline the configured value is used unchanged.
+    """
+    remaining = _remaining_seconds(deadline)
+    if remaining is None:
+        return execute_timeout
+    return max(1, min(execute_timeout, int(remaining)))
+
+
+def _sleep_within_deadline(
+    seconds: float,
+    deadline: Optional[float],
+    timeout_seconds: Optional[float],
+) -> None:
+    """Sleep for ``seconds`` but never past the overall deadline.
+
+    An already-exhausted budget raises immediately, so a long monitor window
+    cannot outlive the deadline.
+    """
+    if seconds <= 0:
+        return
+    remaining = _remaining_seconds(deadline)
+    if remaining is None:
+        time.sleep(seconds)
+        return
+    if remaining <= 0:
+        raise AnalysisDeadlineExceeded(
+            f"analysis deadline exceeded before monitor wait "
+            f"(overall timeout_seconds={timeout_seconds})"
+        )
+    time.sleep(min(seconds, remaining))
+
+
+# ---------------------------------------------------------------------------
 # Cycle helpers
 # ---------------------------------------------------------------------------
 
-def _hash_sample(path: Path) -> Dict[str, Any]:
-    """Streaming SHA-256 + size of the staged sample."""
+_HASH_CHUNKS_PER_DEADLINE_CHECK = 64  # 8 KiB chunks per deadline re-check
+
+
+def _hash_sample(
+    path: Path,
+    deadline: Optional[float] = None,
+    timeout_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Streaming SHA-256 + size; checks ``deadline`` periodically when set."""
     h = hashlib.sha256()
     size = 0
+    chunks = 0
+    if deadline is not None:
+        _check_deadline(deadline, timeout_seconds, "before hashing sample")
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
+            chunks += 1
+            if deadline is not None and chunks % _HASH_CHUNKS_PER_DEADLINE_CHECK == 0:
+                _check_deadline(deadline, timeout_seconds, "while hashing sample")
             h.update(chunk)
             size += len(chunk)
     return {"path": str(path), "sha256": h.hexdigest(), "size": size}
@@ -434,6 +518,7 @@ def analyze_sync(
     bunker_config: Optional[BunkerConfig] = None,
     backend=None,
     guest_path: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run the full inspect-file cycle synchronously and return the verdict.
 
@@ -456,19 +541,30 @@ def analyze_sync(
         bunker_config: Optional BunkerConfig override (tests/advanced use).
         backend: Optional hypervisor backend override (tests use this).
         guest_path: Staging path inside the guest.
+        timeout_seconds: Overall wall-clock deadline for the whole cycle.
+            ``None`` (default) keeps the previous unbounded behaviour. When
+            set, the remaining budget is checked between steps, the monitor
+            wait is capped by it, and each guest command timeout is reduced
+            to it. Exhaustion raises :class:`AnalysisDeadlineExceeded`.
 
     Returns:
         The versioned inspect-report dict.
 
     Raises:
         FileNotFoundError: If the sample path does not exist / is not a file.
+        AnalysisDeadlineExceeded: If ``timeout_seconds`` is set and the
+            budget is exhausted before the cycle completes. The ``finally``
+            decontamination still runs on this path. Other mid-cycle failures
+            are converted into an ``error`` verdict.
     """
     start = time.monotonic()
+    deadline = start + timeout_seconds if timeout_seconds is not None else None
+
     path = Path(sample_path)
     if not path.is_file():
         raise FileNotFoundError(f"Sample not found: {sample_path}")
 
-    sample = _hash_sample(path)
+    sample = _hash_sample(path, deadline, timeout_seconds)
     bunker: Optional[Bunker] = None
     iocs: List[IOC] = []
     error: Optional[str] = None
@@ -476,29 +572,48 @@ def analyze_sync(
 
     try:
         # 2. Bunker lifecycle.
+        _check_deadline(deadline, timeout_seconds, "before bunker creation")
         config = bunker_config if bunker_config is not None else _default_config()
         bunker = Bunker(config, backend=backend)
-        if not bunker.initialize():
+        if not bunker.initialize(deadline=deadline):
             raise RuntimeError("bunker initialize failed")
+        _check_deadline(deadline, timeout_seconds, "after initialize")
+
         if not bunker.activate():
             raise RuntimeError("bunker activate failed")
+        _check_deadline(deadline, timeout_seconds, "after activate")
 
         # 3. Stage (copy to guest) + execute + bounded monitoring.
         gp = guest_path or _default_guest_path(path.name)
-        _stage_to_guest(bunker, path, gp, execute_timeout)
-        _execute_sample(bunker, gp, execute_timeout)
+        _stage_to_guest(
+            bunker, path, gp, _effective_command_timeout(execute_timeout, deadline)
+        )
+        _check_deadline(deadline, timeout_seconds, "after staging")
+
+        _execute_sample(
+            bunker, gp, _effective_command_timeout(execute_timeout, deadline)
+        )
+        _check_deadline(deadline, timeout_seconds, "after execution")
+
         if monitor_seconds > 0:
-            time.sleep(monitor_seconds)
+            _sleep_within_deadline(monitor_seconds, deadline, timeout_seconds)
+        _check_deadline(deadline, timeout_seconds, "after monitor wait")
 
         # 4. Build IOCs.
         iocs = _collect_iocs(bunker, path)
     except FileNotFoundError:
         raise
+    except AnalysisDeadlineExceeded:
+        logger.error(
+            "inspect-file analysis aborted on deadline (timeout_seconds=%s)",
+            timeout_seconds,
+        )
+        raise
     except Exception as exc:
         logger.error("inspect-file analysis failed: %s", exc)
         error = f"{type(exc).__name__}: {exc}"
     finally:
-        # 5. Decontaminate — ALWAYS, even on failure.
+        # 5. Decontaminate — ALWAYS, even on failure or deadline abort.
         decon = _decontaminate(bunker)
 
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -510,3 +625,13 @@ def analyze_sync(
         decontamination=decon,
         error=error,
     )
+
+
+# Known residual hole (documented follow-up, NOT fixed here):
+# - The deadline now bounds ``_hash_sample`` and the steps between
+#   ``Bunker.initialize()`` backend calls, but a single backend call still
+#   carries a fixed internal timeout the cooperative deadline cannot interrupt.
+# - The clean follow-up is a state-store reaper that scans the persisted
+#   ``vm_name`` / ``switch_name`` records (see ``_persist_state`` in
+#   ``lumenos_sandbox/bunker.py``) and destroys resources left behind by a
+#   process that never returned.

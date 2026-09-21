@@ -8,6 +8,8 @@ validation, and CLI happy path + missing file.
 import argparse
 import hashlib
 import json
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -250,6 +252,87 @@ class TestAnalyzeSync:
         # No VM/switch left behind: cleanup steps recorded for the allocated
         # resources (the mock backend removes them).
         assert report["decontamination"]["success"] is True
+
+    def test_deadline_abort_raises_and_still_decontaminates(self, tmp_path, monkeypatch):
+        """R4-1: once the overall deadline is exhausted the cycle aborts by
+        raising, and the finally decontamination still destroys the bunker —
+        no orphaned VM/switch is left behind on the abort path."""
+        import lumenos_sandbox.inspect as inspect_mod
+        from lumenos_sandbox.hypervisor.mock_backend import MockBackend
+
+        removed = {"vm": [], "switch": []}
+        real_remove_vm = MockBackend.remove_vm
+        real_remove_switch = MockBackend.remove_switch
+
+        def spy_remove_vm(self, vm_name, force=True):
+            removed["vm"].append(vm_name)
+            return real_remove_vm(self, vm_name, force)
+
+        def spy_remove_switch(self, switch_name):
+            removed["switch"].append(switch_name)
+            return real_remove_switch(self, switch_name)
+
+        monkeypatch.setattr(MockBackend, "remove_vm", spy_remove_vm)
+        monkeypatch.setattr(MockBackend, "remove_switch", spy_remove_switch)
+
+        # Force the blocking step to outlive the deadline while the bunker is
+        # ACTIVE, so the abort happens with allocated resources to tear down.
+        monkeypatch.setattr(inspect_mod, "_execute_sample", lambda *a, **k: time.sleep(1))
+
+        p = tmp_path / "slow.bin"
+        p.write_bytes(b"data")
+
+        with pytest.raises(inspect_mod.AnalysisDeadlineExceeded):
+            analyze_sync(str(p), monitor_seconds=0, timeout_seconds=0.2)
+
+        assert removed["vm"], "deadline abort must still destroy the VM"
+        assert removed["switch"], "deadline abort must still destroy the switch"
+
+    def test_deadline_caps_guest_command_timeout(self, tmp_path, monkeypatch):
+        """The configured per-command timeout must be reduced to the remaining
+        deadline budget (never below 1 s) so a slow guest command cannot run
+        past the overall cap."""
+        from lumenos_sandbox.hypervisor.base import BackendResult
+        from lumenos_sandbox.hypervisor.mock_backend import MockBackend
+
+        seen = []
+
+        def recording_execute(self, vm_name, username, password, command, timeout=30):
+            seen.append(timeout)
+            return BackendResult(True, "", "")
+
+        monkeypatch.setattr(MockBackend, "execute_in_guest", recording_execute)
+
+        p = tmp_path / "sample.bin"
+        p.write_bytes(b"data")
+        analyze_sync(str(p), monitor_seconds=0, execute_timeout=30, timeout_seconds=5.0)
+
+        assert seen, "sample execution must reach the backend"
+        assert all(1 <= t <= 5 for t in seen), seen
+
+
+class TestInterruptibleTailBudget:
+    """R4-001: the uninterruptible tail must respect the cycle deadline."""
+
+    def test_hash_sample_aborts_when_budget_already_exhausted(self, tmp_path):
+        import lumenos_sandbox.inspect as inspect_mod
+
+        p = tmp_path / "s.bin"; p.write_bytes(b"data")
+        with pytest.raises(inspect_mod.AnalysisDeadlineExceeded):
+            inspect_mod._hash_sample(p, time.monotonic() - 1.0, 5.0)
+
+    def test_initialize_with_exhausted_deadline_skips_backend(self, monkeypatch):
+        from lumenos_sandbox.bunker import Bunker
+        from lumenos_sandbox.inspect import AnalysisDeadlineExceeded
+        from lumenos_sandbox.types import BunkerConfig
+
+        steps = []
+        monkeypatch.setattr(Bunker, "_verify_system_requirements", lambda self: steps.append("verify"))
+        monkeypatch.setattr(Bunker, "_load_base_image", lambda self: steps.append("load"))
+        bunker = Bunker(BunkerConfig(id="dl", name="dl"))
+        with pytest.raises(AnalysisDeadlineExceeded):
+            bunker.initialize(deadline=time.monotonic() - 1.0)
+        assert steps == []
 
 
 # ---------------------------------------------------------------------------
