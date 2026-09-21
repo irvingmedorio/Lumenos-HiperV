@@ -451,3 +451,69 @@ class TestInspectFileCLI:
             main()
         assert exc_info.value.code == 0
         assert "inspect-file" in capsys.readouterr().out
+
+    def test_cli_forwards_timeout_seconds(self, capsys, sample_file, monkeypatch):
+        """--timeout-seconds must be forwarded to analyze_sync as the overall
+        deadline (mirroring the API bound)."""
+        import lumenos_sandbox.inspect as inspect_mod
+        from lumenos_sandbox.cli import cmd_inspect_file
+
+        captured = {}
+
+        def spy(sample_path, *, monitor_seconds=5.0, execute_timeout=30,
+                timeout_seconds=None, **kwargs):
+            captured["timeout_seconds"] = timeout_seconds
+            return {"schema": INSPECT_SCHEMA, "verdict": "clean"}
+
+        monkeypatch.setattr(inspect_mod, "analyze_sync", spy)
+
+        rc = cmd_inspect_file(_inspect_args(sample_file, timeout_seconds=42.0))
+
+        assert rc == 0
+        assert captured["timeout_seconds"] == 42.0
+
+    def test_cli_report_without_verdict_fails_closed(self, capsys, sample_file, monkeypatch):
+        """A malformed report must fail closed with the documented [FAIL]
+        message and exit 1 instead of a bare KeyError traceback."""
+        import lumenos_sandbox.inspect as inspect_mod
+        from lumenos_sandbox.cli import cmd_inspect_file
+
+        monkeypatch.setattr(
+            inspect_mod, "analyze_sync", lambda *a, **k: {"schema": INSPECT_SCHEMA}
+        )
+
+        rc = cmd_inspect_file(_inspect_args(sample_file))
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "[FAIL]" in captured.err
+
+    def test_cli_timeout_seconds_flag_registered(self, monkeypatch, capsys):
+        """The CLI must expose --timeout-seconds on inspect-file."""
+        import sys
+        from lumenos_sandbox.cli import main
+
+        monkeypatch.setattr(
+            sys, "argv", ["lumenos", "inspect-file", "--help"]
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+        assert "--timeout-seconds" in capsys.readouterr().out
+
+    def test_cli_timeout_seconds_rejects_out_of_range(self, monkeypatch, capsys, tmp_path):
+        """--timeout-seconds mirrors the API bound: must be > 0 and <= 3600."""
+        import sys
+        from lumenos_sandbox.cli import main
+
+        sample = tmp_path / "s.bin"
+        sample.write_bytes(b"data")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["lumenos", "inspect-file", str(sample), "--timeout-seconds", "0"],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2
+        assert "timeout-seconds" in capsys.readouterr().err

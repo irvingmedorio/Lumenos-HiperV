@@ -23,6 +23,23 @@ def _setup_logging():
     root.addHandler(handler)
 
 
+def _bounded_timeout_seconds(value):
+    """argparse type: an overall deadline in (0, 3600] seconds.
+
+    Mirrors the API's ``timeout_seconds`` bound (``gt=0``, ``le=3600``) so the
+    CLI and the REST endpoint reject the same out-of-range values.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"invalid float value: {value!r}")
+    if parsed <= 0 or parsed > 3600:
+        raise argparse.ArgumentTypeError(
+            f"--timeout-seconds must be > 0 and <= 3600 (got {parsed})"
+        )
+    return parsed
+
+
 def main():
     _setup_logging()
 
@@ -75,6 +92,26 @@ def main():
     evidence_parser.add_argument("--id", required=True, help="ID del sandbox")
     evidence_parser.add_argument("--output", default="evidence", help="Directorio de salida (default: evidence)")
 
+    # lumenos-sandbox inspect-file <archivo>
+    inspect_parser = subparsers.add_parser(
+        "inspect-file",
+        help="Analizar un archivo de una sola pasada y devolver el veredicto JSON",
+    )
+    inspect_parser.add_argument("archivo", help="Ruta al archivo a analizar")
+    inspect_parser.add_argument(
+        "--monitor-seconds", type=float, default=5.0,
+        help="Duracion acotada del monitoreo en segundos (default: 5.0)",
+    )
+    inspect_parser.add_argument(
+        "--execute-timeout", type=int, default=30,
+        help="Timeout por comando en el guest (default: 30s)",
+    )
+    inspect_parser.add_argument(
+        "--timeout-seconds", type=_bounded_timeout_seconds, default=120.0,
+        help="Overall wall-clock deadline for the analysis in seconds "
+             "(> 0 and <= 3600; default: 120.0)",
+    )
+
     # lumenos-sandbox api [--host 127.0.0.1] [--port 8000] [--reload]
     api_parser = subparsers.add_parser("api", help="Start REST API server (FastAPI + uvicorn)")
     api_parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
@@ -109,6 +146,7 @@ def main():
         "evidence": cmd_evidence,
         "api": cmd_api,
         "setup-linux": cmd_setup_linux,
+        "inspect-file": cmd_inspect_file,
     }
 
     try:
@@ -327,6 +365,43 @@ def cmd_evidence(args):
     print(f"  Items: {len(chain.items)}")
     print(f"  Chain valid: {chain.verify()}")
     return 0
+
+
+def cmd_inspect_file(args):
+    """One-shot synchronous analysis — stage, run, monitor, report,
+    decontaminate, return the verdict JSON.
+
+    Exit status: 0 when a verdict was produced (clean/malicious/suspicious),
+    1 on any error (including verdict ``error`` or missing file).
+    """
+    import json as _json
+    from pathlib import Path
+
+    from .inspect import analyze_sync
+
+    sample = Path(args.archivo)
+    if not sample.is_file():
+        print(f"[FAIL] File not found: {args.archivo}", file=sys.stderr)
+        return 1
+
+    try:
+        report = analyze_sync(
+            str(sample),
+            monitor_seconds=args.monitor_seconds,
+            execute_timeout=args.execute_timeout,
+            timeout_seconds=getattr(args, "timeout_seconds", None),
+        )
+    except Exception as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
+
+    verdict = report.get("verdict") if isinstance(report, dict) else None
+    if verdict is None:
+        print("[FAIL] Analysis report is missing a verdict", file=sys.stderr)
+        return 1
+
+    print(_json.dumps(report, indent=2))
+    return 0 if verdict != "error" else 1
 
 
 def cmd_api(args):
