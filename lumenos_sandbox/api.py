@@ -200,9 +200,10 @@ def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Pa
 # ---------------------------------------------------------------------------
 #
 # POST /analyze-sync authenticates itself inside its handler (via
-# ``_authorize_and_resolve``); every other endpoint authenticates through this
-# router-level dependency, so a request without a valid bearer token is
-# rejected before the handler runs.
+# ``_authorize_and_resolve``), and GET /health is deliberately open so liveness
+# probes can reach it without credentials. Every other endpoint authenticates
+# through this router-level dependency, so a request without a valid bearer
+# token is rejected before the handler runs.
 #
 # TODO(auth-debt): this check is a deliberate DUPLICATE of the token logic
 # inlined in ``_authorize_and_resolve`` above. Both paths must stay in
@@ -237,9 +238,12 @@ protected = APIRouter(dependencies=[Depends(_verify_bearer_token_standalone)])
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@protected.get("/health")
+# Deliberately NOT on the protected router: liveness/readiness probes run
+# without credentials, and this response exposes nothing but a status and a
+# version. It must keep answering 200 even when LUMENOS_API_TOKEN is unset.
+@app.get("/health")
 def health_check():
-    """System health check."""
+    """System health check. Unauthenticated by design (see the note above)."""
     return {"status": "ok", "version": "2.1.0"}
 
 

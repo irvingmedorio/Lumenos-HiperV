@@ -13,10 +13,11 @@ proof for the unvalidated-id finding: with the guard absent, ``id="*"``
 returned 201 and created a real VM/switch/disk, and a traversal-shaped id wrote
 a disk outside ``snapshots/``.
 
-**Authentication.** Every endpoint except POST /analyze-sync requires a bearer
-token (``LUMENOS_API_TOKEN``) through a router-level dependency. That endpoint
-authenticates inside its own handler instead, so its 401/403/503 coverage lives
-in test_inspect.py.
+**Authentication.** Every endpoint except POST /analyze-sync and GET /health
+requires a bearer token (``LUMENOS_API_TOKEN``) through a router-level
+dependency. POST /analyze-sync authenticates inside its own handler, so its
+401/403/503 coverage lives in test_inspect.py; GET /health is deliberately
+unauthenticated for liveness probes.
 
 Backend note: ``tests/conftest.py`` forces ``MockBackend`` (autouse) unless
 ``LUMENOS_HYPERVISOR`` is set, so nothing here touches live VMs.
@@ -73,9 +74,9 @@ LEGITIMATE_IDS = [
 
 TEST_TOKEN = "test-token"
 
-# Every endpoint except POST /analyze-sync. POST /analyze-sync authenticates
-# inside its own handler (via _authorize_and_resolve); the other twelve go
-# through the router-level dependency.
+# The eleven endpoints on the protected router. Two endpoints are deliberately
+# NOT here: POST /analyze-sync authenticates inside its own handler (via
+# _authorize_and_resolve), and GET /health stays open for liveness probes.
 #
 # Paths are kept templated so they can be compared against the router's own
 # route table; PROTECTED_ROUTES below substitutes the sample id to actually
@@ -83,7 +84,6 @@ TEST_TOKEN = "test-token"
 SAMPLE_BUNKER_ID = "dl"
 
 PROTECTED_ROUTE_TEMPLATES = [
-    ("GET", "/health", None),
     ("GET", "/bunkers", None),
     ("POST", "/bunkers", {"id": SAMPLE_BUNKER_ID, "name": "n", "memory_mb": 512,
                           "cpu_cores": 1, "disk_gb": 10}),
@@ -224,15 +224,18 @@ class TestBunkerIdPathParamGuard:
 
 
 # ---------------------------------------------------------------------------
-# Authentication on the twelve protected routes
+# Authentication on the eleven protected routes
 # ---------------------------------------------------------------------------
 
 class TestProtectedRouteAuth:
-    """Every endpoint except POST /analyze-sync requires the bearer token.
+    """The eleven protected endpoints require the bearer token.
 
-    POST /analyze-sync is excluded on purpose: it authenticates inside its own
-    handler (``_authorize_and_resolve``) and therefore is not on the protected
-    router. Its own 401/403/503 tests live in test_inspect.py.
+    Two endpoints are excluded on purpose and are not on the protected router:
+
+    - POST /analyze-sync authenticates inside its own handler
+      (``_authorize_and_resolve``); its 401/403/503 tests live in test_inspect.py.
+    - GET /health is unauthenticated so liveness probes work without
+      credentials; see ``test_health_is_open_without_auth``.
     """
 
     @pytest.mark.parametrize("method,path,body", PROTECTED_ROUTES, ids=_ROUTE_IDS)
@@ -270,16 +273,21 @@ class TestProtectedRouteAuth:
         assert r.status_code == 201, r.text
         assert r.json()["ok"] is True
 
-    def test_health_is_guarded_too(self, client):
+    def test_health_is_open_without_auth(self, client, monkeypatch):
+        """Liveness probes must reach /health with no credentials — and it must
+        keep answering even when the token is not configured at all."""
         assert client.get(
             "/health", headers={"Authorization": ""}
-        ).status_code == 401
-        r = client.get("/health")
-        assert r.status_code == 200 and r.json()["status"] == "ok"
+        ).status_code == 200
+
+        monkeypatch.delenv("LUMENOS_API_TOKEN", raising=False)
+        r = client.get("/health", headers={"Authorization": ""})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
 
     # --- structural guards: these fail if a future route skips the guard ----
 
-    def test_router_covers_exactly_the_twelve_endpoints(self):
+    def test_router_covers_exactly_the_eleven_protected_endpoints(self):
         actual = {(m, r.path) for r in protected.routes for m in r.methods}
         expected = {(method, path) for method, path, _ in PROTECTED_ROUTE_TEMPLATES}
         assert actual == expected
@@ -287,16 +295,23 @@ class TestProtectedRouteAuth:
     def test_no_route_escapes_the_auth_guard(self):
         """A route added to ``app`` instead of ``protected`` would slip past the
         token check. The OpenAPI document is the authoritative inventory of
-        published endpoints, so it catches that mistake."""
+        published endpoints, so it catches that mistake.
+
+        Every documented endpoint must be either on the protected router or on
+        the explicit unauthenticated allowlist below.
+        """
         documented = {
             (method.upper(), path)
             for path, operations in app.openapi()["paths"].items()
             for method in operations
         }
         guarded = {(m, r.path) for r in protected.routes for m in r.methods}
-        self_authenticating = {("POST", "/analyze-sync")}
+        deliberately_unauthenticated = {
+            ("POST", "/analyze-sync"),   # authenticates inside its handler
+            ("GET", "/health"),          # open for liveness probes
+        }
 
-        assert documented - guarded - self_authenticating == set()
+        assert documented - guarded - deliberately_unauthenticated == set()
 
     def test_analyze_sync_authenticates_itself_not_via_the_router(self, client):
         assert not any(r.path == "/analyze-sync" for r in protected.routes)
