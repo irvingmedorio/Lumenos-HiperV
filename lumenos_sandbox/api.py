@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .types import BunkerConfig, BunkerState
@@ -196,23 +196,61 @@ def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Pa
 
 
 # ---------------------------------------------------------------------------
+# Authentication for the remaining endpoints
+# ---------------------------------------------------------------------------
+#
+# POST /analyze-sync authenticates itself inside its handler (via
+# ``_authorize_and_resolve``); every other endpoint authenticates through this
+# router-level dependency, so a request without a valid bearer token is
+# rejected before the handler runs.
+#
+# TODO(auth-debt): this check is a deliberate DUPLICATE of the token logic
+# inlined in ``_authorize_and_resolve`` above. Both paths must stay in
+# agreement on the scheme, the constant-time comparison and the fail-closed
+# 503. The intended fix is to extract a single shared verifier that
+# ``_authorize_and_resolve`` also calls, but that touches bytes carrying burned
+# review authority from the previous session, so the refactor is deliberately
+# deferred. Until it lands: change one, change BOTH.
+
+def _verify_bearer_token_standalone(authorization: Optional[str] = Header(None)) -> None:
+    """Fail-closed bearer-token check used as a FastAPI dependency.
+
+    Unconfigured token -> 503, missing or wrong token -> 401. Mirrors
+    ``_authorize_and_resolve``'s token half; see the TODO above.
+    """
+    expected = os.environ.get("LUMENOS_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="API token not configured")
+    scheme, _, presented = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not presented or not hmac.compare_digest(
+        presented.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
+
+
+# Routes declared on this router require the bearer token. Anything added here
+# later is therefore protected by default rather than by remembering to opt in.
+protected = APIRouter(dependencies=[Depends(_verify_bearer_token_standalone)])
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@protected.get("/health")
 def health_check():
     """System health check."""
     return {"status": "ok", "version": "2.1.0"}
 
 
-@app.get("/bunkers")
+@protected.get("/bunkers")
 def list_bunkers():
     """List all known bunkers."""
     store = get_state_store()
     return store.list_all()
 
 
-@app.post("/bunkers", response_model=MessageResponse, status_code=201)
+@protected.post("/bunkers", response_model=MessageResponse, status_code=201)
 def create_bunker(payload: BunkerCreate):
     """Create a new bunker (initializes Hyper-V resources)."""
     store = get_state_store()
@@ -239,14 +277,14 @@ def create_bunker(payload: BunkerCreate):
     return MessageResponse(ok=True, message=f"Bunker {config.id} created", data=bunker.get_full_status())
 
 
-@app.get("/bunkers/{bunker_id}")
+@protected.get("/bunkers/{bunker_id}")
 def get_bunker(bunker_id: str):
     """Get full status of a bunker."""
     bunker = _get_bunker(bunker_id)
     return bunker.get_full_status()
 
 
-@app.post("/bunkers/{bunker_id}/start", response_model=MessageResponse)
+@protected.post("/bunkers/{bunker_id}/start", response_model=MessageResponse)
 def start_bunker(bunker_id: str):
     """Initialize a bunker (create VM + switch)."""
     bunker = _get_bunker(bunker_id)
@@ -259,7 +297,7 @@ def start_bunker(bunker_id: str):
     return MessageResponse(ok=True, message=f"Bunker {bunker_id} initialized")
 
 
-@app.post("/bunkers/{bunker_id}/stop", response_model=MessageResponse)
+@protected.post("/bunkers/{bunker_id}/stop", response_model=MessageResponse)
 def stop_bunker(bunker_id: str):
     """Terminate and decontaminate a bunker."""
     bunker = _get_bunker(bunker_id)
@@ -272,7 +310,7 @@ def stop_bunker(bunker_id: str):
     return MessageResponse(ok=True, message=f"Bunker {bunker_id} terminated")
 
 
-@app.post("/bunkers/{bunker_id}/activate", response_model=MessageResponse)
+@protected.post("/bunkers/{bunker_id}/activate", response_model=MessageResponse)
 def activate_bunker(bunker_id: str):
     """Activate security layers + monitoring."""
     bunker = _get_bunker(bunker_id)
@@ -285,14 +323,14 @@ def activate_bunker(bunker_id: str):
     return MessageResponse(ok=True, message=f"Bunker {bunker_id} activated")
 
 
-@app.get("/bunkers/{bunker_id}/metrics")
+@protected.get("/bunkers/{bunker_id}/metrics")
 def get_metrics(bunker_id: str):
     """Get collector metrics from bunker."""
     bunker = _get_bunker(bunker_id)
     return bunker.get_full_status()["collector_metrics"]
 
 
-@app.post("/bunkers/{bunker_id}/analyze", response_model=MessageResponse)
+@protected.post("/bunkers/{bunker_id}/analyze", response_model=MessageResponse)
 def analyze_sample(bunker_id: str, payload: AnalyzeRequest):
     """Analyze a sample — deploy to guest VM."""
     bunker = _get_bunker(bunker_id)
@@ -310,7 +348,7 @@ def analyze_sample(bunker_id: str, payload: AnalyzeRequest):
     )
 
 
-@app.get("/bunkers/{bunker_id}/report")
+@protected.get("/bunkers/{bunker_id}/report")
 def get_report(bunker_id: str):
     """Get security report for a bunker."""
     bunker = _get_bunker(bunker_id)
@@ -322,7 +360,7 @@ def get_report(bunker_id: str):
     }
 
 
-@app.get("/evidence/{bunker_id}")
+@protected.get("/evidence/{bunker_id}")
 def get_evidence(bunker_id: str):
     """Collect and verify forensic evidence chain."""
     # Verify bunker exists
@@ -332,7 +370,7 @@ def get_evidence(bunker_id: str):
     return chain.to_dict()
 
 
-@app.get("/compliance")
+@protected.get("/compliance")
 def get_compliance():
     """Evaluate security controls and return compliance report."""
     report = ComplianceReport()
@@ -425,6 +463,11 @@ def _run_analysis(payload: AnalyzeSyncRequest) -> Dict[str, Any]:
     except Exception as exc:
         logger.error("analyze-sync analysis failed: %s", exc)
         return build_error_report(payload.sample_path, exc)
+
+
+# Mount the protected routes with an explicit empty prefix so every published
+# URL stays byte-for-byte the same as before this change.
+app.include_router(protected, prefix="")
 
 
 # ---------------------------------------------------------------------------

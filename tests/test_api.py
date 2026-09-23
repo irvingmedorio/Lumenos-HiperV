@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""API-boundary validation for ``BunkerCreate.id`` (and its path-param guard).
+"""API-boundary tests: bunker-id validation and bearer-token authentication.
 
-A bunker id is not just a label: it is propagated into VM/switch names, host
-filesystem paths (``evidence/<id>``, ``snapshots/<id>_system.vhdx``) and glob
-patterns (``<id>_decontamination_*.json``). These tests pin the charset guard
-that stops traversal and glob injection at the API boundary.
+Two concerns live here.
 
-They are also the regression proof for the unvalidated-id finding: with the
-guard absent, ``id="*"`` returned 201 and created a real VM/switch/disk, and a
-traversal-shaped id wrote a disk outside ``snapshots/``.
+**Bunker-id validation.** A bunker id is not just a label: it is propagated
+into VM/switch names, host filesystem paths (``evidence/<id>``,
+``snapshots/<id>_system.vhdx``) and glob patterns
+(``<id>_decontamination_*.json``). These tests pin the charset guard that stops
+traversal and glob injection at the API boundary. They are also the regression
+proof for the unvalidated-id finding: with the guard absent, ``id="*"``
+returned 201 and created a real VM/switch/disk, and a traversal-shaped id wrote
+a disk outside ``snapshots/``.
+
+**Authentication.** Every endpoint except POST /analyze-sync requires a bearer
+token (``LUMENOS_API_TOKEN``) through a router-level dependency. That endpoint
+authenticates inside its own handler instead, so its 401/403/503 coverage lives
+in test_inspect.py.
 
 Backend note: ``tests/conftest.py`` forces ``MockBackend`` (autouse) unless
 ``LUMENOS_HYPERVISOR`` is set, so nothing here touches live VMs.
@@ -29,6 +36,7 @@ from lumenos_sandbox.api import (  # noqa: E402
     _BUNKER_ID_PATTERN,
     BunkerCreate,
     app,
+    protected,
 )
 from lumenos_sandbox.bunker import get_state_store  # noqa: E402
 
@@ -63,6 +71,40 @@ LEGITIMATE_IDS = [
     "a" * 64,            # exactly at the bound
 ]
 
+TEST_TOKEN = "test-token"
+
+# Every endpoint except POST /analyze-sync. POST /analyze-sync authenticates
+# inside its own handler (via _authorize_and_resolve); the other twelve go
+# through the router-level dependency.
+#
+# Paths are kept templated so they can be compared against the router's own
+# route table; PROTECTED_ROUTES below substitutes the sample id to actually
+# call them.
+SAMPLE_BUNKER_ID = "dl"
+
+PROTECTED_ROUTE_TEMPLATES = [
+    ("GET", "/health", None),
+    ("GET", "/bunkers", None),
+    ("POST", "/bunkers", {"id": SAMPLE_BUNKER_ID, "name": "n", "memory_mb": 512,
+                          "cpu_cores": 1, "disk_gb": 10}),
+    ("GET", "/bunkers/{bunker_id}", None),
+    ("POST", "/bunkers/{bunker_id}/start", None),
+    ("POST", "/bunkers/{bunker_id}/stop", None),
+    ("POST", "/bunkers/{bunker_id}/activate", None),
+    ("GET", "/bunkers/{bunker_id}/metrics", None),
+    ("POST", "/bunkers/{bunker_id}/analyze", {"sample_path": "x"}),
+    ("GET", "/bunkers/{bunker_id}/report", None),
+    ("GET", "/evidence/{bunker_id}", None),
+    ("GET", "/compliance", None),
+]
+
+PROTECTED_ROUTES = [
+    (method, path.replace("{bunker_id}", SAMPLE_BUNKER_ID), body)
+    for method, path, body in PROTECTED_ROUTE_TEMPLATES
+]
+
+_ROUTE_IDS = [f"{method} {path}" for method, path, _ in PROTECTED_ROUTE_TEMPLATES]
+
 
 def _payload(bunker_id: str) -> dict:
     return {
@@ -90,8 +132,16 @@ def _isolate_registry():
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    """Authenticated client for the protected routes.
+
+    Every endpoint except POST /analyze-sync requires the bearer token, so the
+    id-validation tests below must authenticate. The token is set through
+    monkeypatch, so it is reverted automatically after each test.
+    """
+    monkeypatch.setenv("LUMENOS_API_TOKEN", TEST_TOKEN)
     with TestClient(app) as c:
+        c.headers["Authorization"] = f"Bearer {TEST_TOKEN}"
         yield c
 
 
@@ -171,3 +221,85 @@ class TestBunkerIdPathParamGuard:
 
         assert r.status_code == 400, r.text
         assert called == [], "collect_evidence was reached with a dirty id"
+
+
+# ---------------------------------------------------------------------------
+# Authentication on the twelve protected routes
+# ---------------------------------------------------------------------------
+
+class TestProtectedRouteAuth:
+    """Every endpoint except POST /analyze-sync requires the bearer token.
+
+    POST /analyze-sync is excluded on purpose: it authenticates inside its own
+    handler (``_authorize_and_resolve``) and therefore is not on the protected
+    router. Its own 401/403/503 tests live in test_inspect.py.
+    """
+
+    @pytest.mark.parametrize("method,path,body", PROTECTED_ROUTES, ids=_ROUTE_IDS)
+    def test_missing_token_is_401(self, client, method, path, body):
+        r = client.request(method, path, json=body,
+                           headers={"Authorization": ""})
+        assert r.status_code == 401, f"{method} {path} -> {r.status_code}"
+
+    @pytest.mark.parametrize("method,path,body", PROTECTED_ROUTES, ids=_ROUTE_IDS)
+    def test_wrong_token_is_401(self, client, method, path, body):
+        r = client.request(method, path, json=body,
+                           headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401, f"{method} {path} -> {r.status_code}"
+
+    def test_unconfigured_token_fails_closed_with_503(self, client, monkeypatch):
+        """Fail-closed: an unconfigured token must refuse, never fall open."""
+        monkeypatch.delenv("LUMENOS_API_TOKEN", raising=False)
+        r = client.get("/bunkers")
+        assert r.status_code == 503
+        assert "not configured" in r.json()["detail"]
+
+    def test_unconfigured_token_fails_closed_on_a_state_changing_route(
+            self, client, monkeypatch):
+        monkeypatch.delenv("LUMENOS_API_TOKEN", raising=False)
+        r = client.post("/bunkers/dl/stop")
+        assert r.status_code == 503
+
+    def test_valid_token_reaches_the_handler(self, client):
+        r = client.get("/bunkers")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_valid_token_creates_a_bunker_with_the_mock_backend(self, client):
+        r = client.post("/bunkers", json=_payload("auth_ok"))
+        assert r.status_code == 201, r.text
+        assert r.json()["ok"] is True
+
+    def test_health_is_guarded_too(self, client):
+        assert client.get(
+            "/health", headers={"Authorization": ""}
+        ).status_code == 401
+        r = client.get("/health")
+        assert r.status_code == 200 and r.json()["status"] == "ok"
+
+    # --- structural guards: these fail if a future route skips the guard ----
+
+    def test_router_covers_exactly_the_twelve_endpoints(self):
+        actual = {(m, r.path) for r in protected.routes for m in r.methods}
+        expected = {(method, path) for method, path, _ in PROTECTED_ROUTE_TEMPLATES}
+        assert actual == expected
+
+    def test_no_route_escapes_the_auth_guard(self):
+        """A route added to ``app`` instead of ``protected`` would slip past the
+        token check. The OpenAPI document is the authoritative inventory of
+        published endpoints, so it catches that mistake."""
+        documented = {
+            (method.upper(), path)
+            for path, operations in app.openapi()["paths"].items()
+            for method in operations
+        }
+        guarded = {(m, r.path) for r in protected.routes for m in r.methods}
+        self_authenticating = {("POST", "/analyze-sync")}
+
+        assert documented - guarded - self_authenticating == set()
+
+    def test_analyze_sync_authenticates_itself_not_via_the_router(self, client):
+        assert not any(r.path == "/analyze-sync" for r in protected.routes)
+        r = client.post("/analyze-sync", json={"sample_path": "/tmp/x"},
+                        headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401
