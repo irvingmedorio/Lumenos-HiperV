@@ -9,6 +9,7 @@ import concurrent.futures
 import hmac
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -37,14 +38,27 @@ app = FastAPI(
 # In-memory bunker registry (keyed by bunker id)
 _bunkers: Dict[str, Bunker] = {}
 
+# A bunker id is not just a label: it becomes a VM/switch name, an on-disk
+# artifact path (``evidence/<id>``, ``snapshots/<id>_system.vhdx``) and a glob
+# pattern (``<id>_decontamination_*.json``). An unconstrained id is therefore a
+# traversal / glob-injection primitive, so the API boundary pins it to a strict
+# charset: no path separators (``/`` or ``\``), no glob metacharacters, no
+# leading dot, at most 64 characters.
+_BUNKER_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
 
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
 
 class BunkerCreate(BaseModel):
-    """Payload for POST /bunkers."""
-    id: str = Field(..., description="Unique bunker identifier")
+    """Payload for POST /bunkers.
+
+    ``id`` is constrained to ``_BUNKER_ID_PATTERN`` because it is propagated
+    into VM/switch names and host filesystem paths.
+    """
+    id: str = Field(..., pattern=_BUNKER_ID_PATTERN,
+                    description="Unique bunker identifier")
     name: str = Field(..., description="Human-readable name")
     memory_mb: int = Field(8192, ge=512, description="RAM in MB")
     cpu_cores: int = Field(4, ge=1, description="Number of CPU cores")
@@ -125,7 +139,17 @@ atexit.register(lambda: _analysis_executor.shutdown(wait=False, cancel_futures=T
 # ---------------------------------------------------------------------------
 
 def _get_bunker(bunker_id: str) -> Bunker:
-    """Return an in-memory bunker or try to restore from state store."""
+    """Return an in-memory bunker or try to restore from state store.
+
+    The id is re-validated here as well as at creation time: this value is an
+    attacker-controlled path parameter, and persisted records may predate the
+    creation-time constraint. The guard must never assume a clean id, because
+    ``bunker_id`` is handed to ``collect_evidence`` as a path component.
+    """
+    if not re.fullmatch(_BUNKER_ID_PATTERN, bunker_id):
+        raise HTTPException(
+            status_code=400, detail=f"Invalid bunker id: {bunker_id!r}"
+        )
     if bunker_id in _bunkers:
         return _bunkers[bunker_id]
 
