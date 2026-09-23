@@ -7,6 +7,9 @@ snapshots/*
 !snapshots/.gitignore
 *.avhdx
 *.db
+# SQLite WAL sidecars left in the repo root by the test suite
+*.db-shm
+*.db-wal
 .venv/
 .pytest_cache/
 # Local Pi runtime state
