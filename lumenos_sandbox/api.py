@@ -41,9 +41,12 @@ _bunkers: Dict[str, Bunker] = {}
 # A bunker id is not just a label: it becomes a VM/switch name, an on-disk
 # artifact path (``evidence/<id>``, ``snapshots/<id>_system.vhdx``) and a glob
 # pattern (``<id>_decontamination_*.json``). An unconstrained id is therefore a
-# traversal / glob-injection primitive, so the API boundary pins it to a strict
-# charset: no path separators (``/`` or ``\``), no glob metacharacters, no
-# leading dot, at most 64 characters.
+# traversal / glob-injection primitive, so the charset is pinned at the two
+# boundaries that matter: id creation (``BunkerCreate.id``) and the one route
+# that turns an id into a path (``get_evidence``). It is deliberately NOT
+# enforced when resolving an existing bunker: a record written before this
+# guard existed must stay manageable, or its VM, switch and disk would be
+# stranded with no way to stop, decontaminate or decommission them.
 _BUNKER_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 
 
@@ -141,15 +144,13 @@ atexit.register(lambda: _analysis_executor.shutdown(wait=False, cancel_futures=T
 def _get_bunker(bunker_id: str) -> Bunker:
     """Return an in-memory bunker or try to restore from state store.
 
-    The id is re-validated here as well as at creation time: this value is an
-    attacker-controlled path parameter, and persisted records may predate the
-    creation-time constraint. The guard must never assume a clean id, because
-    ``bunker_id`` is handed to ``collect_evidence`` as a path component.
+    The id charset is deliberately NOT enforced here. A persisted record may
+    predate the creation-time constraint, and refusing to resolve such an id
+    would strand its VM, switch and disk: they could never be stopped,
+    decontaminated or decommissioned. Resolution therefore accepts any id the
+    store already knows; the charset is enforced at creation and at the one
+    route that turns an id into a filesystem path (``get_evidence``).
     """
-    if not re.fullmatch(_BUNKER_ID_PATTERN, bunker_id):
-        raise HTTPException(
-            status_code=400, detail=f"Invalid bunker id: {bunker_id!r}"
-        )
     if bunker_id in _bunkers:
         return _bunkers[bunker_id]
 
@@ -366,7 +367,18 @@ def get_report(bunker_id: str):
 
 @protected.get("/evidence/{bunker_id}")
 def get_evidence(bunker_id: str):
-    """Collect and verify forensic evidence chain."""
+    """Collect and verify forensic evidence chain.
+
+    This is the one route that turns the id into a filesystem path
+    (``evidence/<id>``) and into a glob, so the charset is enforced here rather
+    than in ``_get_bunker``: a legacy id stays manageable everywhere else while
+    this sink still refuses a traversal-shaped or glob-shaped id.
+    """
+    if not re.fullmatch(_BUNKER_ID_PATTERN, bunker_id):
+        raise HTTPException(
+            status_code=400, detail=f"Invalid bunker id: {bunker_id!r}"
+        )
+
     # Verify bunker exists
     _get_bunker(bunker_id)
 

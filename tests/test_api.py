@@ -191,20 +191,36 @@ class TestBunkerIdValidation:
 # dot-segments out of a URL before sending it.
 DIRTY_PATH_IDS = ["*", "%2e%2e", "..%5C..%5Cetc", "a" * 65]
 
+# An id the pre-guard code accepted and persisted, but the charset rejects.
+# URL-safe on purpose, so the test exercises resolution and not URL encoding.
+LEGACY_ID = "_legacy_bunker"
+
 
 class TestBunkerIdPathParamGuard:
+    """The charset is enforced at the path sink, not at resolution.
+
+    Resolving a dirty id must stay possible, because a legacy record has to
+    remain manageable; a dirty id that matches no record is therefore simply
+    not found. Only the route that turns the id into a filesystem path refuses
+    it outright.
+    """
 
     @pytest.mark.parametrize("bad", DIRTY_PATH_IDS)
-    def test_read_routes_reject_dirty_path_params(self, client, bad):
+    def test_dirty_ids_do_not_resolve(self, client, bad):
         for route in (f"/bunkers/{bad}", f"/bunkers/{bad}/report",
                       f"/bunkers/{bad}/metrics"):
             r = client.get(route)
-            assert r.status_code == 400, f"{route} -> {r.status_code}"
+            assert r.status_code == 404, f"{route} -> {r.status_code}"
 
     @pytest.mark.parametrize("bad", DIRTY_PATH_IDS)
-    def test_state_changing_routes_reject_dirty_path_params(self, client, bad):
+    def test_state_changing_routes_do_not_resolve_dirty_ids(self, client, bad):
         r = client.post(f"/bunkers/{bad}/stop")
-        assert r.status_code == 400, f"/bunkers/{bad}/stop -> {r.status_code}"
+        assert r.status_code == 404, f"/bunkers/{bad}/stop -> {r.status_code}"
+
+    @pytest.mark.parametrize("bad", DIRTY_PATH_IDS)
+    def test_evidence_route_refuses_dirty_ids(self, client, bad):
+        r = client.get(f"/evidence/{bad}")
+        assert r.status_code == 400, f"/evidence/{bad} -> {r.status_code}"
 
     def test_evidence_route_never_reaches_forensics(self, client, monkeypatch):
         """The glob-injection vector: ``id='*'`` must be refused *before*
@@ -221,6 +237,35 @@ class TestBunkerIdPathParamGuard:
 
         assert r.status_code == 400, r.text
         assert called == [], "collect_evidence was reached with a dirty id"
+
+    def test_persisted_legacy_id_stays_manageable(self, client):
+        """Regression for R4-legacy-id-lockout.
+
+        A record written before the charset guard existed must still resolve.
+        Refusing it would strand its VM, switch and disk with no way to stop,
+        decontaminate or decommission them — the lockout the review found.
+        """
+        assert not re.fullmatch(_BUNKER_ID_PATTERN, LEGACY_ID)
+
+        get_state_store().save(LEGACY_ID, {
+            "config": {"id": LEGACY_ID, "name": "legacy"},
+            "state": "ACTIVE",
+            "vm_name": "bunker_legacy",
+            "switch_name": "lumenos_legacy_switch",
+        })
+
+        # Resolution and the lifecycle routes keep working...
+        assert client.get(f"/bunkers/{LEGACY_ID}").status_code == 200
+        assert client.get(f"/bunkers/{LEGACY_ID}/metrics").status_code == 200
+
+        # The stop route resolves the record and starts the lifecycle
+        # transition. Whether termination runs to completion is a pre-existing
+        # property of the restore path, not what this finding is about: what
+        # matters is that the id is no longer refused with a lockout.
+        assert client.post(f"/bunkers/{LEGACY_ID}/stop").status_code != 400
+
+        # ...while the path-turning route still refuses it.
+        assert client.get(f"/evidence/{LEGACY_ID}").status_code == 400
 
 
 # ---------------------------------------------------------------------------
