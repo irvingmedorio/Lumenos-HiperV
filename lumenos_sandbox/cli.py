@@ -121,6 +121,36 @@ def main():
     # lumenos-sandbox setup-linux
     subparsers.add_parser("setup-linux", help="Install KVM/QEMU/libvirt dependencies on Linux")
 
+    # lumenos-sandbox reap [--states ERROR] [--older-than-hours 24] [--execute]
+    reap_parser = subparsers.add_parser(
+        "reap",
+        help="Clean orphaned state-store records and their host resources",
+        description=(
+            "Scan the state store for records a dead process left behind and, "
+            "with --execute, remove their VM/switch/disk and delete the row. "
+            "Dry-run by default. Age is measured against updated_at, a naive "
+            "local timestamp written on every transition."
+        ),
+    )
+    reap_parser.add_argument(
+        "--states", default="",
+        help="Comma-separated states to act on (default: ERROR). Opt-in: "
+             "TERMINATING,DECONTAMINATING. Never reapable: INITIALIZING,"
+             "READY,ACTIVE,QUARANTINE,DESTROYED",
+    )
+    reap_parser.add_argument(
+        "--older-than-hours", type=float, default=24.0,
+        help="Only act on records older than this; 0 disables the filter (default: 24)",
+    )
+    reap_mode = reap_parser.add_mutually_exclusive_group()
+    reap_mode.add_argument("--dry-run", action="store_true",
+                           help="Report only, change nothing (default)")
+    reap_mode.add_argument("--execute", action="store_true",
+                           help="Remove host resources and delete the rows")
+    reap_parser.add_argument(
+        "--keep-on-failure", action="store_true",
+        help="Keep the row when cleanup leaves residuals (retryable), not delete it")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -147,6 +177,7 @@ def main():
         "api": cmd_api,
         "setup-linux": cmd_setup_linux,
         "inspect-file": cmd_inspect_file,
+        "reap": cmd_reap,
     }
 
     try:
@@ -332,6 +363,38 @@ def cmd_migrate(_args=None):
     store = get_state_store()
     count = store.migrate_from_json("snapshots")
     print(f"Migrated {count} state file(s) from snapshots/ to SQLite")
+    return 0
+
+
+def cmd_reap(args):
+    """Clean orphaned state-store records and the host resources they point at.
+
+    Dry-run unless ``--execute`` is given. Residual cleanup failures are always
+    reported on stderr: once the row is deleted that warning is the only trace
+    of a resource that may still be alive.
+    """
+    from .bunker import get_state_store
+    from .hypervisor import get_backend
+    from .reaper import reap, render_report, render_residuals
+
+    raw = (getattr(args, "states", "") or "").strip()
+    names = [s.strip() for s in raw.split(",") if s.strip()] or None
+    try:
+        report = reap(
+            get_state_store(), get_backend(),
+            execute=bool(getattr(args, "execute", False)),
+            states=names,
+            older_than_hours=getattr(args, "older_than_hours", 24.0),
+            keep_on_failure=bool(getattr(args, "keep_on_failure", False)),
+        )
+    except ValueError as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
+
+    print(render_report(report))
+    residuals = render_residuals(report)
+    if residuals:
+        print(residuals, file=sys.stderr)
     return 0
 
 
