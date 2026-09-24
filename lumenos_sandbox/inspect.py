@@ -16,6 +16,7 @@ used by both the REST endpoint (``POST /analyze-sync``) and the CLI command
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from .bunker import Bunker, get_state_store
+from .exceptions import SampleTooLarge
 from .types import (
     BunkerConfig,
     BunkerState,
@@ -305,23 +307,71 @@ def _sleep_within_deadline(
 
 _HASH_CHUNKS_PER_DEADLINE_CHECK = 64  # 8 KiB chunks per deadline re-check
 
+# Hard cap on a single sample, checked before the file is opened and again while
+# streaming: the streaming read is what holds a hashing worker — and therefore
+# an admission slot — for the whole file, so an unbounded sample would occupy
+# analysis capacity without ever producing a verdict.
+MAX_SAMPLE_SIZE_MB_DEFAULT = 500
+
+
+def max_sample_bytes() -> int:
+    """Effective per-sample size cap in bytes.
+
+    ``MAX_SAMPLE_SIZE_MB`` overrides the default. A missing, unparsable or
+    non-positive value falls back to the default: the cap fails closed, it
+    cannot be disabled through the environment.
+    """
+    raw = os.environ.get("MAX_SAMPLE_SIZE_MB", "").strip()
+    try:
+        mb = int(raw) if raw else MAX_SAMPLE_SIZE_MB_DEFAULT
+    except ValueError:
+        mb = MAX_SAMPLE_SIZE_MB_DEFAULT
+    if mb <= 0:
+        mb = MAX_SAMPLE_SIZE_MB_DEFAULT
+    return mb * 1024 * 1024
+
+
+def ensure_sample_within_limit(path: Path) -> None:
+    """Raise :class:`SampleTooLarge` when *path* exceeds the effective cap.
+
+    Called before the file is opened: an oversized sample must be refused
+    without reading a byte.
+    """
+    limit = max_sample_bytes()
+    try:
+        on_disk = os.path.getsize(path)
+    except OSError:
+        return  # unreadable size — let the read path report the real failure
+    if on_disk > limit:
+        raise SampleTooLarge(on_disk, limit)
+
 
 def _hash_sample(
     path: Path,
     deadline: Optional[float] = None,
     timeout_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Streaming SHA-256 + size; checks ``deadline`` periodically when set."""
+    """Streaming SHA-256 + size; checks ``deadline`` periodically when set.
+
+    Refuses a sample over the effective cap (``MAX_SAMPLE_SIZE_MB``) before the
+    first read, and re-checks while streaming: a file that grows or is swapped
+    in after the pre-open check (TOCTOU) still aborts instead of holding the
+    worker for the whole read.
+    """
+    limit = max_sample_bytes()
     h = hashlib.sha256()
     size = 0
     chunks = 0
     if deadline is not None:
         _check_deadline(deadline, timeout_seconds, "before hashing sample")
+    ensure_sample_within_limit(path)
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             chunks += 1
             if deadline is not None and chunks % _HASH_CHUNKS_PER_DEADLINE_CHECK == 0:
                 _check_deadline(deadline, timeout_seconds, "while hashing sample")
+            if size > limit:
+                raise SampleTooLarge(size, limit)
             h.update(chunk)
             size += len(chunk)
     return {"path": str(path), "sha256": h.hexdigest(), "size": size}

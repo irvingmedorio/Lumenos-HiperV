@@ -59,6 +59,7 @@ from .exceptions import (
     DecontaminationFailure,
     IntegrityCheckFailure,
     BunkerNotReady,
+    SampleTooLarge,
 )
 
 from .monitoring import IntegrityVerifier, SecurityMonitor
@@ -104,6 +105,7 @@ __all__ = [
     "DecontaminationFailure",
     "IntegrityCheckFailure",
     "BunkerNotReady",
+    "SampleTooLarge",
     # Data Classes
     "BunkerConfig",
     "SecurityEvent",

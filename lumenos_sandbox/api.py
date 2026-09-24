@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .types import BunkerConfig, BunkerState
@@ -24,6 +24,47 @@ from .compliance import ComplianceReport
 from .observability import check_health
 
 logger = logging.getLogger("LUMENOS_SANDBOX")
+
+# ---------------------------------------------------------------------------
+# Access audit log (follow-up #13)
+# ---------------------------------------------------------------------------
+#
+# Every refused API access emits exactly one structured line. Credential
+# material is never recorded: the token, its digest and the raw Authorization
+# header are absent by construction — only the decision, the reason and the
+# request metadata reach the log.
+#
+# The request path and the User-Agent header are caller-controlled, so both go
+# through _sanitize_audit_field: a newline would forge a log entry and an
+# unbounded value would flood the audit trail.
+#
+# The audit deliberately lives in the wrappers, not inside _require_bearer_token:
+# that function's bytes are certified and it receives no Request object. Both of
+# its call sites are wrapped here, so no refusal goes unrecorded.
+_AUDIT_FIELD_MAX = 200
+
+
+def _sanitize_audit_field(value: Optional[str], max_len: int = _AUDIT_FIELD_MAX) -> str:
+    """Neutralize caller-supplied text before it reaches the audit log."""
+    if not value:
+        return "-"
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in value)
+    return cleaned[:max_len]
+
+
+def _log_access_denied(request: Request, status_code: int, reason: str) -> None:
+    """Emit one audit line for a denied or refused access."""
+    client = request.client.host if request.client else "unknown"
+    logger.warning(
+        "access denied status=%d reason=%s method=%s endpoint=%s client=%s ua=%s",
+        status_code,
+        reason,
+        request.method,
+        _sanitize_audit_field(request.url.path),
+        _sanitize_audit_field(client, 64),
+        _sanitize_audit_field(request.headers.get("user-agent")),
+    )
+
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -222,14 +263,21 @@ def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Pa
 # definition of the scheme, the constant-time comparison and the fail-closed
 # 503. Change it there, never here.
 
-def _verify_bearer_token_standalone(authorization: Optional[str] = Header(None)) -> None:
+def _verify_bearer_token_standalone(
+    request: Request, authorization: Optional[str] = Header(None)
+) -> None:
     """FastAPI dependency adapter over ``_require_bearer_token``.
 
     ``Header(None)`` must stay in this signature: FastAPI introspects it to
-    bind the ``Authorization`` header. The check itself is not duplicated
-    here; see ``_require_bearer_token``.
+    bind the ``Authorization`` header. ``Request`` is injected for the audit
+    line only; the check itself is not duplicated here. See
+    ``_require_bearer_token``.
     """
-    _require_bearer_token(authorization)
+    try:
+        _require_bearer_token(authorization)
+    except HTTPException as exc:
+        _log_access_denied(request, exc.status_code, "bearer")
+        raise
 
 
 # Routes declared on this router require the bearer token. Anything added here
@@ -410,7 +458,9 @@ def get_compliance():
 
 @app.post("/analyze-sync")
 def analyze_sync_endpoint(
-    payload: AnalyzeSyncRequest, authorization: Optional[str] = Header(None)
+    request: Request,
+    payload: AnalyzeSyncRequest,
+    authorization: Optional[str] = Header(None),
 ):
     """Synchronous one-shot analysis for LUMENOS_Custom.
 
@@ -422,14 +472,33 @@ def analyze_sync_endpoint(
     between steps and returns a structured ``error`` verdict; the caller
     additionally waits ``timeout_seconds + _ANALYSIS_TEARDOWN_MARGIN_SECONDS``
     so that clean abort normally wins the race. Validation errors yield
-    400/422; a worker still running past that longer wait (an uninterruptible
+    400/413/422; a worker still running past that longer wait (an uninterruptible
     backend call) yields 504; an exhausted admission budget yields 503.
     """
-    resolved = _authorize_and_resolve(payload.sample_path, authorization)
+    try:
+        resolved = _authorize_and_resolve(payload.sample_path, authorization)
+    except HTTPException as exc:
+        _log_access_denied(request, exc.status_code, "sample-authorization")
+        raise
+
     if not resolved.is_file():
+        # A valid token probing the host filesystem is exactly the signal the
+        # audit trail exists to capture, so this refusal is recorded too.
+        _log_access_denied(request, 400, "sample-not-found")
         raise HTTPException(
             status_code=400, detail=f"Sample not found: {payload.sample_path}"
         )
+
+    # Refuse an oversized sample BEFORE an admission slot is taken: the slot is
+    # the scarce resource, and a 50 GB file would otherwise hold a worker for
+    # the whole read. _hash_sample re-checks while streaming (TOCTOU).
+    from .inspect import SampleTooLarge, ensure_sample_within_limit
+
+    try:
+        ensure_sample_within_limit(resolved)
+    except SampleTooLarge as exc:
+        _log_access_denied(request, 413, "sample-too-large")
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     # Downstream stages use the confined resolved path, not the raw input.
     payload.sample_path = str(resolved)
 

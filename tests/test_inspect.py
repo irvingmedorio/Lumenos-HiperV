@@ -336,6 +336,84 @@ class TestInterruptibleTailBudget:
 
 
 # ---------------------------------------------------------------------------
+# Sample size cap (follow-up #3)
+# ---------------------------------------------------------------------------
+
+class TestSampleSizeLimit:
+    """An oversized sample is refused before it is read.
+
+    The cap is what keeps one large file from occupying a hashing worker — and
+    therefore an admission slot — for the whole read.
+    """
+
+    def test_default_cap_is_500_mb(self, monkeypatch):
+        from lumenos_sandbox.inspect import (
+            MAX_SAMPLE_SIZE_MB_DEFAULT,
+            max_sample_bytes,
+        )
+
+        monkeypatch.delenv("MAX_SAMPLE_SIZE_MB", raising=False)
+        assert MAX_SAMPLE_SIZE_MB_DEFAULT == 500
+        assert max_sample_bytes() == 500 * 1024 * 1024
+
+    def test_environment_overrides_the_cap(self, monkeypatch):
+        from lumenos_sandbox.inspect import max_sample_bytes
+
+        monkeypatch.setenv("MAX_SAMPLE_SIZE_MB", "2")
+        assert max_sample_bytes() == 2 * 1024 * 1024
+
+    @pytest.mark.parametrize("raw", ["", "   ", "not-a-number", "0", "-5"])
+    def test_cap_fails_closed_on_a_bad_environment_value(self, monkeypatch, raw):
+        """Missing, unparsable or non-positive: the cap cannot be disabled."""
+        from lumenos_sandbox.inspect import max_sample_bytes
+
+        monkeypatch.setenv("MAX_SAMPLE_SIZE_MB", raw)
+        assert max_sample_bytes() == 500 * 1024 * 1024
+
+    def test_oversized_sample_is_refused_without_reading_it(
+            self, tmp_path, monkeypatch):
+        from lumenos_sandbox.inspect import (
+            SampleTooLarge,
+            ensure_sample_within_limit,
+        )
+
+        monkeypatch.setenv("MAX_SAMPLE_SIZE_MB", "1")
+        p = tmp_path / "big.bin"
+        p.write_bytes(b"\x00" * (1024 * 1024 + 1))
+
+        with pytest.raises(SampleTooLarge) as excinfo:
+            ensure_sample_within_limit(p)
+
+        assert excinfo.value.size_bytes == 1024 * 1024 + 1
+        assert excinfo.value.limit_bytes == 1024 * 1024
+
+    def test_streaming_guard_stops_a_file_the_pre_check_missed(
+            self, tmp_path, monkeypatch):
+        """Second line of defence: if the pre-open check is bypassed or raced
+        (the file grows after the stat), the streaming cap still aborts."""
+        import lumenos_sandbox.inspect as inspect_mod
+
+        monkeypatch.setenv("MAX_SAMPLE_SIZE_MB", "1")
+        monkeypatch.setattr(inspect_mod, "ensure_sample_within_limit", lambda _p: None)
+        p = tmp_path / "big.bin"
+        p.write_bytes(b"\x00" * (2 * 1024 * 1024))
+
+        with pytest.raises(inspect_mod.SampleTooLarge):
+            inspect_mod._hash_sample(p)
+
+    def test_a_sample_under_the_cap_still_hashes(self, tmp_path, monkeypatch):
+        from lumenos_sandbox.inspect import _hash_sample
+
+        monkeypatch.setenv("MAX_SAMPLE_SIZE_MB", "1")
+        p = tmp_path / "small.bin"
+        p.write_bytes(b"benign")
+
+        result = _hash_sample(p)
+        assert result["size"] == 6
+        assert result["sha256"] == hashlib.sha256(b"benign").hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # API endpoint
 # ---------------------------------------------------------------------------
 
@@ -557,6 +635,38 @@ class TestAnalyzeSyncAPI:
         )
         assert r.status_code == 200
         assert calls == ["Bearer test-token"]
+
+    # --- sample size cap (follow-up #3) ------------------------------------
+
+    def test_oversized_sample_is_413_and_costs_no_admission_slot(
+            self, _client, tmp_path, monkeypatch):
+        """The 413 must be decided before a slot is taken: the point of the cap
+        is that an oversized file cannot occupy analysis capacity."""
+        import lumenos_sandbox.api as api_mod
+
+        monkeypatch.setenv("MAX_SAMPLE_SIZE_MB", "1")
+        p = tmp_path / "big.bin"
+        p.write_bytes(b"\x00" * (1024 * 1024 + 1))
+
+        # Zero slots: a taken-but-unavailable slot would answer 503. Answering
+        # 413 instead proves the size decision ran upstream of the admission
+        # bound without touching that bound's logic.
+        monkeypatch.setattr(api_mod, "_analysis_slots", threading.BoundedSemaphore(0))
+        r = _client.post(
+            "/analyze-sync",
+            json={"sample_path": str(p), "monitor_seconds": 0},
+        )
+        assert r.status_code == 413, r.text
+        assert "limit" in r.json()["detail"].lower()
+
+    def test_sample_under_the_cap_is_analysed(self, _client, sample_file, monkeypatch):
+        monkeypatch.setenv("MAX_SAMPLE_SIZE_MB", "1")
+        r = _client.post(
+            "/analyze-sync",
+            json={"sample_path": sample_file, "monitor_seconds": 0},
+        )
+        assert r.status_code == 200
+        assert r.json()["verdict"] == "clean"
 
 
 # ---------------------------------------------------------------------------

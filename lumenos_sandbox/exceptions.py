@@ -41,3 +41,19 @@ class IntegrityCheckFailure(LumenosException):
 class BunkerNotReady(LumenosException):
     """El bunker no está listo para la operación solicitada."""
     pass
+
+
+class SampleTooLarge(LumenosException):
+    """A sample exceeds the configured size cap and is refused unread.
+
+    Carries the observed size and the effective limit so the API can answer
+    413 without re-stat-ing the file.
+    """
+
+    def __init__(self, size_bytes: int, limit_bytes: int):
+        self.size_bytes = size_bytes
+        self.limit_bytes = limit_bytes
+        super().__init__(
+            f"Sample is {size_bytes} bytes, over the "
+            f"{limit_bytes}-byte limit (see MAX_SAMPLE_SIZE_MB)"
+        )

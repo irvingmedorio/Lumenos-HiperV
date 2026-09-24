@@ -25,6 +25,8 @@ Backend note: ``tests/conftest.py`` forces ``MockBackend`` (autouse) unless
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 from pathlib import Path
 
@@ -383,6 +385,102 @@ class TestProtectedRouteAuth:
         r = client.get("/bunkers")
         assert r.status_code == 200
         assert calls == [f"Bearer {TEST_TOKEN}"]
+
+
+# ---------------------------------------------------------------------------
+# Access audit logging (follow-up #13)
+# ---------------------------------------------------------------------------
+
+def _audit_lines(caplog) -> list:
+    """The audit lines emitted by the refused accesses under test."""
+    return [r.getMessage() for r in caplog.records if "access denied" in r.getMessage()]
+
+
+class TestAccessAuditLogging:
+    """Every refusal leaves exactly one audit line — and never credential data.
+
+    The audit lives in the two wrappers around ``_require_bearer_token``, not
+    inside it: that function's bytes are certified, and it receives no
+    ``Request``. Both call sites are covered, so no refusal is silent.
+    """
+
+    def test_wrong_token_is_logged_with_status_endpoint_and_client(
+            self, client, caplog):
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            r = client.get("/bunkers", headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401
+        lines = _audit_lines(caplog)
+        assert len(lines) == 1
+        assert "status=401" in lines[0]
+        assert "endpoint=/bunkers" in lines[0]
+        assert "client=" in lines[0]
+        assert "ua=" in lines[0]
+
+    @pytest.mark.parametrize("header", ["", "Bearer wrong"])
+    def test_both_401_shapes_are_logged(self, client, caplog, header):
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            r = client.get("/bunkers", headers={"Authorization": header})
+        assert r.status_code == 401
+        assert "status=401" in _audit_lines(caplog)[0]
+
+    def test_unconfigured_token_is_logged_as_503(self, client, caplog, monkeypatch):
+        monkeypatch.delenv("LUMENOS_API_TOKEN", raising=False)
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            r = client.get("/bunkers")
+        assert r.status_code == 503
+        assert "status=503" in _audit_lines(caplog)[0]
+
+    def test_analyze_sync_auth_denial_is_logged(self, client, caplog):
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            r = client.post("/analyze-sync", json={"sample_path": "/tmp/x"},
+                            headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401
+        assert "status=401" in _audit_lines(caplog)[0]
+
+    def test_analyze_sync_out_of_root_sample_is_logged_as_403(
+            self, client, caplog, monkeypatch, tmp_path):
+        run = tmp_path / "run"
+        run.mkdir()
+        outside = tmp_path / "outside.bin"
+        outside.write_bytes(b"x")
+        monkeypatch.setenv("LUMENOS_SAMPLES_ROOT", str(run))
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            r = client.post("/analyze-sync", json={"sample_path": str(outside)})
+        assert r.status_code == 403
+        assert "status=403" in _audit_lines(caplog)[0]
+
+    def test_missing_sample_is_logged_as_400(
+            self, client, caplog, monkeypatch, tmp_path):
+        monkeypatch.setenv("LUMENOS_SAMPLES_ROOT", str(tmp_path))
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            r = client.post("/analyze-sync",
+                            json={"sample_path": str(tmp_path / "ghost.bin")})
+        assert r.status_code == 400
+        assert "status=400" in _audit_lines(caplog)[0]
+
+    def test_the_presented_token_never_reaches_the_log(self, client, caplog):
+        secret = "sup3r-secret-token"
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            client.get("/bunkers", headers={"Authorization": f"Bearer {secret}"})
+        text = caplog.text
+        assert secret not in text
+        assert "Authorization" not in text
+        assert hashlib.sha256(secret.encode()).hexdigest() not in text
+
+    def test_caller_supplied_fields_cannot_forge_or_flood_a_log_line(
+            self, client, caplog):
+        """The path and User-Agent are caller-controlled: a newline must not
+        become a second record and length must stay bounded."""
+        forged = "EvilBot\r\n{\"msg\": \"access denied status=200\"}" + "A" * 500
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX"):
+            client.get("/bunkers", headers={
+                "Authorization": "Bearer wrong",
+                "User-Agent": forged,
+            })
+        lines = _audit_lines(caplog)
+        assert len(lines) == 1
+        assert "\n" not in lines[0] and "\r" not in lines[0]
+        assert "A" * 201 not in lines[0]   # capped at _AUDIT_FIELD_MAX
 
 
 # ---------------------------------------------------------------------------
