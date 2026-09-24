@@ -171,11 +171,13 @@ def _get_bunker(bunker_id: str) -> Bunker:
     return bunker
 
 
-def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Path:
-    """Fail-closed auth + path confinement for ``POST /analyze-sync``.
+def _require_bearer_token(authorization: Optional[str]) -> None:
+    """Fail-closed bearer-token check shared by the router dependency and
+    ``_authorize_and_resolve``.
 
-    Unconfigured token/root -> 503, bad token -> 401, sample outside
-    ``LUMENOS_SAMPLES_ROOT`` -> 403. Returns the resolved sample path.
+    Unconfigured token -> 503, missing or wrong token -> 401. This is the
+    single definition of the accepted scheme, the constant-time comparison
+    and the fail-closed status; both call sites must go through it.
     """
     expected = os.environ.get("LUMENOS_API_TOKEN", "")
     if not expected:
@@ -185,6 +187,15 @@ def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Pa
         presented.encode("utf-8"), expected.encode("utf-8")
     ):
         raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
+
+
+def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Path:
+    """Fail-closed auth + path confinement for ``POST /analyze-sync``.
+
+    Unconfigured token/root -> 503, bad token -> 401, sample outside
+    ``LUMENOS_SAMPLES_ROOT`` -> 403. Returns the resolved sample path.
+    """
+    _require_bearer_token(authorization)
 
     root_raw = os.environ.get("LUMENOS_SAMPLES_ROOT", "")
     if not root_raw:
@@ -206,28 +217,19 @@ def _authorize_and_resolve(sample_path: str, authorization: Optional[str]) -> Pa
 # through this router-level dependency, so a request without a valid bearer
 # token is rejected before the handler runs.
 #
-# TODO(auth-debt): this check is a deliberate DUPLICATE of the token logic
-# inlined in ``_authorize_and_resolve`` above. Both paths must stay in
-# agreement on the scheme, the constant-time comparison and the fail-closed
-# 503. The intended fix is to extract a single shared verifier that
-# ``_authorize_and_resolve`` also calls, but that touches bytes carrying burned
-# review authority from the previous session, so the refactor is deliberately
-# deferred. Until it lands: change one, change BOTH.
+# The token check itself lives in ``_require_bearer_token`` above: both this
+# dependency and ``_authorize_and_resolve`` call it, so there is exactly one
+# definition of the scheme, the constant-time comparison and the fail-closed
+# 503. Change it there, never here.
 
 def _verify_bearer_token_standalone(authorization: Optional[str] = Header(None)) -> None:
-    """Fail-closed bearer-token check used as a FastAPI dependency.
+    """FastAPI dependency adapter over ``_require_bearer_token``.
 
-    Unconfigured token -> 503, missing or wrong token -> 401. Mirrors
-    ``_authorize_and_resolve``'s token half; see the TODO above.
+    ``Header(None)`` must stay in this signature: FastAPI introspects it to
+    bind the ``Authorization`` header. The check itself is not duplicated
+    here; see ``_require_bearer_token``.
     """
-    expected = os.environ.get("LUMENOS_API_TOKEN", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail="API token not configured")
-    scheme, _, presented = (authorization or "").partition(" ")
-    if scheme.lower() != "bearer" or not presented or not hmac.compare_digest(
-        presented.encode("utf-8"), expected.encode("utf-8")
-    ):
-        raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
+    _require_bearer_token(authorization)
 
 
 # Routes declared on this router require the bearer token. Anything added here

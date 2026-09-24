@@ -537,6 +537,27 @@ class TestAnalyzeSyncAPI:
                          json={"sample_path": sample_file, "monitor_seconds": 0})
         assert r.status_code == 200 and r.json()["verdict"] == "clean"
 
+    def test_analyze_sync_delegates_to_the_shared_verifier(
+            self, _client, sample_file, monkeypatch):
+        """Anti-regression for the auth debt: the in-handler path must call
+        ``_require_bearer_token`` instead of re-inlining the token check."""
+        import lumenos_sandbox.api as api_mod
+
+        calls = []
+        real = api_mod._require_bearer_token
+
+        def spy(authorization):
+            calls.append(authorization)
+            return real(authorization)
+
+        monkeypatch.setattr(api_mod, "_require_bearer_token", spy)
+        r = _client.post(
+            "/analyze-sync",
+            json={"sample_path": sample_file, "monitor_seconds": 0},
+        )
+        assert r.status_code == 200
+        assert calls == ["Bearer test-token"]
+
 
 # ---------------------------------------------------------------------------
 # CLI

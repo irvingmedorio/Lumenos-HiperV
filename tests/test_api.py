@@ -367,6 +367,23 @@ class TestProtectedRouteAuth:
                         headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 401
 
+    def test_router_path_delegates_to_the_shared_verifier(self, client, monkeypatch):
+        """Anti-regression for the auth debt: the router dependency must call
+        ``_require_bearer_token`` instead of re-inlining the token check."""
+        import lumenos_sandbox.api as api_mod
+
+        calls = []
+        real = api_mod._require_bearer_token
+
+        def spy(authorization):
+            calls.append(authorization)
+            return real(authorization)
+
+        monkeypatch.setattr(api_mod, "_require_bearer_token", spy)
+        r = client.get("/bunkers")
+        assert r.status_code == 200
+        assert calls == [f"Bearer {TEST_TOKEN}"]
+
 
 # ---------------------------------------------------------------------------
 # Atomic create — a failed initialize() must leave nothing behind
