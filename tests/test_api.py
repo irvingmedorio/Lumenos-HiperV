@@ -26,6 +26,7 @@ Backend note: ``tests/conftest.py`` forces ``MockBackend`` (autouse) unless
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -39,7 +40,9 @@ from lumenos_sandbox.api import (  # noqa: E402
     app,
     protected,
 )
-from lumenos_sandbox.bunker import get_state_store  # noqa: E402
+from lumenos_sandbox.bunker import Bunker, get_state_store  # noqa: E402
+from lumenos_sandbox.hypervisor.mock_backend import MockBackend  # noqa: E402
+from lumenos_sandbox.types import BunkerConfig  # noqa: E402
 
 # Vectors that must never reach a VM name, a path component or a glob.
 TRAVERSAL_AND_INJECTION_VECTORS = [
@@ -363,3 +366,145 @@ class TestProtectedRouteAuth:
         r = client.post("/analyze-sync", json={"sample_path": "/tmp/x"},
                         headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Atomic create — a failed initialize() must leave nothing behind
+# ---------------------------------------------------------------------------
+
+class _RecordingBackend(MockBackend):
+    """MockBackend that records the teardown calls it receives."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def remove_vm(self, vm_name, force=True):
+        self.calls.append(("remove_vm", vm_name))
+        return True
+
+    def remove_switch(self, switch_name):
+        self.calls.append(("remove_switch", switch_name))
+        return True
+
+    def delete_file(self, path):
+        self.calls.append(("delete_file", path))
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return True
+
+
+class TestCreateBunkerAtomicity:
+    """POST /bunkers is atomic (follow-up #2).
+
+    ``Bunker.initialize()`` persists INITIALIZING and then ERROR through
+    ``transition_to`` -> ``_persist_state``, so before the fix a failed create
+    returned 500 and left an orphan ``ERROR`` row behind. These tests pin the
+    rollback: no store row, no leaked host resources, and the id free for a
+    retry. The backend is the autouse MockBackend from conftest, patched per
+    test so nothing touches a live hypervisor.
+    """
+
+    def test_failed_create_leaves_no_store_row(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "lumenos_sandbox.hypervisor.mock_backend.MockBackend.check_available",
+            lambda self: False,
+        )
+        r = client.post("/bunkers", json=_payload("atomic_early"))
+        assert r.status_code == 500, r.text
+        assert get_state_store().list_all() == []
+
+    def test_failed_create_leaves_no_registry_entry(self, client, monkeypatch):
+        import lumenos_sandbox.api as api_mod
+
+        monkeypatch.setattr(
+            "lumenos_sandbox.hypervisor.mock_backend.MockBackend.check_available",
+            lambda self: False,
+        )
+        client.post("/bunkers", json=_payload("atomic_registry"))
+        assert "atomic_registry" not in api_mod._bunkers
+
+    def test_failed_create_frees_the_id_for_retry(self, client, monkeypatch):
+        """The proof the row is really gone: the same id must be creatable
+        again instead of coming back as a 409 on a phantom record."""
+        available = {"ok": False}
+        monkeypatch.setattr(
+            "lumenos_sandbox.hypervisor.mock_backend.MockBackend.check_available",
+            lambda self: available["ok"],
+        )
+
+        assert client.post(
+            "/bunkers", json=_payload("atomic_retry")
+        ).status_code == 500
+        assert get_state_store().list_all() == []
+
+        available["ok"] = True
+        r = client.post("/bunkers", json=_payload("atomic_retry"))
+        assert r.status_code == 201, r.text
+        assert r.json()["data"]["config"]["id"] == "atomic_retry"
+
+    def test_failed_create_removes_vm_and_switch(self, client, monkeypatch):
+        """A failure *after* resources were allocated must still tear them
+        down (that part is Bunker._cleanup_on_failure)."""
+        calls = []
+
+        def _boom(self, vm_name):
+            raise RuntimeError("guest integration failed")
+
+        monkeypatch.setattr(
+            "lumenos_sandbox.hypervisor.mock_backend.MockBackend.enable_guest_integration",
+            _boom,
+        )
+        monkeypatch.setattr(
+            "lumenos_sandbox.hypervisor.mock_backend.MockBackend.remove_vm",
+            lambda self, vm, force=True: calls.append(("remove_vm", vm)) or True,
+        )
+        monkeypatch.setattr(
+            "lumenos_sandbox.hypervisor.mock_backend.MockBackend.remove_switch",
+            lambda self, sw: calls.append(("remove_switch", sw)) or True,
+        )
+
+        r = client.post("/bunkers", json=_payload("atomic_late"))
+        assert r.status_code == 500, r.text
+        assert get_state_store().list_all() == []
+        assert ("remove_vm", "bunker_atomic_late") in calls
+        assert ("remove_switch", "lumenos_atomic_late_switch") in calls
+
+
+class TestCleanupOnFailureRemovesDisk:
+    """The differencing disk is a host resource that VM removal does not cover
+    on Hyper-V (``Remove-VM`` detaches the VHD but leaves the file). The
+    cleanup must delete it explicitly, and must never escape ``snapshots/``.
+    """
+
+    def test_removes_the_differencing_disk(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "snapshots").mkdir()
+        disk = tmp_path / "snapshots" / "atomic_disk_system.vhdx"
+        disk.write_bytes(b"vhdx")
+
+        backend = _RecordingBackend()
+        bunker = Bunker(BunkerConfig(id="atomic_disk", name="n"), backend=backend)
+        bunker._cleanup_on_failure()
+
+        assert not disk.exists()
+        assert any(
+            call[0] == "delete_file" and Path(call[1]).name == disk.name
+            for call in backend.calls
+        )
+
+    def test_never_deletes_outside_the_snapshots_dir(self, tmp_path, monkeypatch):
+        """A legacy traversal-shaped id must not turn the cleanup into an
+        arbitrary-file delete."""
+        monkeypatch.chdir(tmp_path)
+        outside = tmp_path / "outside_system.vhdx"
+        outside.write_bytes(b"important")
+
+        backend = _RecordingBackend()
+        bunker = Bunker(BunkerConfig(id="../outside", name="n"), backend=backend)
+        bunker._cleanup_on_failure()
+
+        assert outside.exists(), "cleanup escaped the snapshots directory"
+        assert not any(call[0] == "delete_file" for call in backend.calls)

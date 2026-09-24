@@ -275,8 +275,21 @@ def create_bunker(payload: BunkerCreate):
     )
 
     bunker = Bunker(config)
-    if not bunker.initialize():
-        raise HTTPException(status_code=500, detail="Failed to initialize bunker")
+    try:
+        if not bunker.initialize():
+            raise HTTPException(status_code=500, detail="Failed to initialize bunker")
+    except Exception:
+        # A create is atomic. initialize() persists INITIALIZING and then ERROR
+        # through transition_to -> _persist_state, so a failure would otherwise
+        # leave an orphan row the caller never learned about (the 500 hides it).
+        # Drop it so the id is free again; the host resources were already
+        # removed by Bunker._cleanup_on_failure(). Best-effort: a rollback
+        # failure must never mask the original error.
+        try:
+            store.delete(config.id)
+        except Exception as exc:
+            logger.debug("Could not roll back failed create %s: %s", config.id, exc)
+        raise
 
     _bunkers[config.id] = bunker
     return MessageResponse(ok=True, message=f"Bunker {config.id} created", data=bunker.get_full_status())

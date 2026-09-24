@@ -249,6 +249,22 @@ class Bunker:
                 logger.warning("Failed to clean up switch %s: %s", self._switch_name, exc)
             self._switch_name = None
 
+        # The differencing disk outlives the VM on Hyper-V: Remove-VM detaches
+        # the VHD but does not delete the file, so remove it explicitly. On KVM
+        # remove_vm already deleted it (--remove-all-storage) and this is a
+        # no-op. Mirrors inspect.py's ephemeral teardown. The resolved path must
+        # stay inside snapshots/ so a legacy traversal-shaped id can never turn
+        # this into an arbitrary-file delete.
+        snapshots_dir = Path("snapshots").resolve()
+        diff_vhd = (snapshots_dir / f"{self.config.id}_system.vhdx").resolve()
+        if diff_vhd.parent == snapshots_dir:
+            try:
+                if diff_vhd.exists():
+                    self.backend.delete_file(str(diff_vhd))
+                    logger.info("Cleaned up disk %s after init failure", diff_vhd)
+            except Exception as exc:
+                logger.warning("Failed to clean up disk %s: %s", diff_vhd, exc)
+
     def activate(self) -> bool:
         """Activa el bunker para pruebas."""
         try:
