@@ -24,6 +24,21 @@ class PSResult:
     stderr: str
 
 
+def _private_switch_command(switch_name: str) -> str:
+    """PowerShell command that creates this host's private virtual switch.
+
+    ``Private`` is strictly stronger than ``Internal``: an internal switch also
+    puts a vEthernet adapter with an IP on the host side of the sample's wire,
+    so a bunkered sample could reach host services (SMB, RDP, WinRM) — exactly
+    the surface it should never see. Host-to-guest management does not need the
+    switch: it runs over VMBus (PowerShell Direct).
+    """
+    return (
+        f"New-VMSwitch -Name '{switch_name}' -SwitchType Private "
+        "-ErrorAction SilentlyContinue"
+    )
+
+
 class HyperVClient(HypervisorBackend):
     """Encapsulates all Hyper-V PowerShell interactions.
 
@@ -254,12 +269,12 @@ class HyperVClient(HypervisorBackend):
     # Virtual switches
     # -----------------------------------------------------------------------
     def create_internal_switch(self, switch_name: str) -> bool:
-        """Create an internal-only virtual switch (no external uplink)."""
-        cmd = (
-            f"New-VMSwitch -Name '{switch_name}' -SwitchType Internal "
-            "-ErrorAction SilentlyContinue"
-        )
-        result = self._run_ps(cmd)
+        """Create this host's private switch (see ``_private_switch_command``).
+
+        The method keeps its historical ``internal`` name: renaming it would
+        touch six modules and about thirty test patch targets.
+        """
+        result = self._run_ps(_private_switch_command(switch_name))
         if not result.success:
             logger.warning("Failed to create switch %s: %s", switch_name, result.stderr)
         return result.success

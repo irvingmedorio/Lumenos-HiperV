@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """KvmBackend — KVM/QEMU/libvirt implementation of HypervisorBackend."""
+import hashlib
 import json
 import logging
 import shutil
@@ -9,6 +10,32 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from .base import HypervisorBackend, BackendResult
 logger = logging.getLogger("LUMENOS_SANDBOX.kvm")
+
+def _isolated_network_xml(switch_name: str) -> str:
+    """Build the XML for one bunker's isolated libvirt network.
+
+    ``mode='none'`` pins the network to isolated: no NAT, no route, no LAN. An
+    absent ``<forward>`` already means isolated, but stating it keeps a later
+    edit from silently turning a bunker into a NAT cage.
+
+    Bridge name and subnet are derived from the FULL switch name. The previous
+    ``switch_name[:8]`` prefix was always the literal ``"lumenos_"``, so every
+    network claimed the same bridge and the same 192.168.200.0/24: a second
+    bunker either failed to start or landed on the first bunker's L2 segment,
+    putting two samples on one wire. The hash keeps both unique and
+    deterministic (so a re-define is idempotent), with the interface name
+    inside the 15-character Linux limit and the address inside 10.0.0.0/8.
+    """
+    digest = hashlib.sha256(switch_name.encode("utf-8")).hexdigest()
+    iface = "br-" + digest[:12]                      # 15 chars: IFNAMSIZ-1
+    subnet = f"10.{int(digest[12:14], 16)}.{int(digest[14:16], 16)}.1"
+    return (
+        f"<network><name>{switch_name}</name>"
+        f"<forward mode='none'/>"
+        f"<bridge name='{iface}'/>"
+        f"<ip address='{subnet}' netmask='255.255.255.0'/>"
+        f"</network>"
+    )
 
 class KvmBackend(HypervisorBackend):
     def _run(self, cmd: List[str], timeout: int = 30):
@@ -91,7 +118,8 @@ class KvmBackend(HypervisorBackend):
         try: Path(path).unlink(missing_ok=True); return True
         except Exception as e: logger.warning("delete_file %s: %s", path, e); return False
     def create_internal_switch(self, switch_name: str) -> bool:
-        xml = f"<network><name>{switch_name}</name><bridge name='virbr-{switch_name[:8]}'/><ip address='192.168.200.1' netmask='255.255.255.0'/></network>"
+        """Create this bunker's isolated network (see ``_isolated_network_xml``)."""
+        xml = _isolated_network_xml(switch_name)
         import tempfile, os
         with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
             f.write(xml); tmp=f.name
