@@ -104,3 +104,83 @@ def test_hyperv_switch_command_is_private_not_internal():
     assert "New-VMSwitch" in cmd
     assert "-SwitchType Private" in cmd
     assert "-SwitchType Internal" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# Guest telemetry on KVM is not implemented — and must say so honestly
+# ---------------------------------------------------------------------------
+
+# Observation: a verdict cannot be supported without these, so they raise.
+KVM_UNSUPPORTED_OBSERVATION_CALLS = [
+    ("test_guest_connectivity", ("vm", "u", "p")),
+    ("get_guest_processes", ("vm", "u", "p")),
+    ("kill_guest_process", ("vm", "u", "p", "proc")),
+    ("check_guest_vbs_status", ("vm", "u", "p")),
+    ("read_guest_event_log", ("vm", "u", "p")),
+    ("check_guest_registry", ("vm", "u", "p", "HKLM\\Software")),
+    ("install_sysmon_in_guest", ("vm", "u", "p")),
+]
+
+# Setup: refusing these would abort the cycle before any analysis, so they are
+# logged and reported as failed instead.
+KVM_DEGRADED_SETUP_CALLS = [
+    ("enable_guest_integration", ("vm",)),
+    ("configure_guest_firewall", ("vm", "u", "p")),
+]
+
+
+class TestKvmGuestTelemetryIsHonest:
+    """KvmBackend cannot collect guest telemetry, so it must say so.
+
+    Returning True/[] used to read as "the guest is isolated" and "no findings"
+    — an all-clear the backend cannot support. Observation refuses; setup
+    degrades so the bunker can still be created and analysed statically.
+    """
+
+    @pytest.mark.parametrize(
+        "name,args",
+        KVM_UNSUPPORTED_OBSERVATION_CALLS,
+        ids=[name for name, _ in KVM_UNSUPPORTED_OBSERVATION_CALLS],
+    )
+    def test_unimplemented_observation_raises_instead_of_returning_a_sentinel(
+            self, name, args):
+        from lumenos_sandbox.hypervisor.kvm_backend import KvmBackend
+        from lumenos_sandbox.exceptions import GuestTelemetryUnavailable
+
+        with pytest.raises(GuestTelemetryUnavailable) as excinfo:
+            getattr(KvmBackend(), name)(*args)
+
+        assert excinfo.value.capability == name
+
+    @pytest.mark.parametrize(
+        "name,args",
+        KVM_DEGRADED_SETUP_CALLS,
+        ids=[name for name, _ in KVM_DEGRADED_SETUP_CALLS],
+    )
+    def test_unimplemented_setup_logs_and_reports_failure_without_raising(
+            self, name, args, caplog):
+        """Setup must not abort the cycle — but it must not claim success
+        either, and the degradation has to be visible in the log."""
+        import logging
+
+        from lumenos_sandbox.hypervisor.kvm_backend import KvmBackend
+
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX.kvm"):
+            result = getattr(KvmBackend(), name)(*args)
+
+        assert result is False
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(name in m for m in warnings), warnings
+
+    def test_kvm_backend_still_satisfies_the_abc(self):
+        from lumenos_sandbox.hypervisor.kvm_backend import KvmBackend
+
+        assert not KvmBackend.__abstractmethods__
+        KvmBackend()
+
+    def test_mock_backend_stays_permissive(self):
+        """REQ-04: the test backend keeps returning safe defaults and never
+        raises on the same calls the KVM backend now refuses."""
+        m = MockBackend()
+        for name, args in KVM_UNSUPPORTED_OBSERVATION_CALLS + KVM_DEGRADED_SETUP_CALLS:
+            getattr(m, name)(*args)

@@ -791,3 +791,129 @@ class TestInspectFileCLI:
             main()
         assert exc_info.value.code == 2
         assert "timeout-seconds" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Uncollected guest telemetry must not become an all-clear
+# ---------------------------------------------------------------------------
+
+class TestTelemetryUnavailableVerdict:
+    """A capability that was never consulted is not a clean guest."""
+
+    def _monitor(self):
+        from lumenos_sandbox.monitoring import SecurityMonitor
+
+        return SecurityMonitor("telemetry-test")
+
+    def test_no_missing_capability_means_no_error(self):
+        from lumenos_sandbox.inspect import _telemetry_error
+
+        class _Monitor:
+            telemetry_unavailable = []
+
+        class _Bunker:
+            security_monitor = _Monitor()
+
+        assert _telemetry_error(_Bunker()) is None
+        assert _telemetry_error(None) is None
+
+    def test_error_names_every_unconsulted_capability(self):
+        from lumenos_sandbox.inspect import _telemetry_error
+
+        class _Monitor:
+            telemetry_unavailable = ["get_guest_processes", "test_guest_connectivity"]
+
+        class _Bunker:
+            security_monitor = _Monitor()
+
+        message = _telemetry_error(_Bunker())
+
+        assert "get_guest_processes" in message
+        assert "test_guest_connectivity" in message
+
+    def test_monitor_records_an_unconsulted_capability(self, monkeypatch):
+        from lumenos_sandbox.exceptions import GuestTelemetryUnavailable
+
+        monitor = self._monitor()
+        monitor.set_vm_credentials("vm", "u", "p")
+
+        def _unavailable(*_args, **_kwargs):
+            raise GuestTelemetryUnavailable("test_guest_connectivity")
+
+        # ``_check_network_activity`` imports the symbol from hyperv_client at
+        # call time, so the source-module attribute is the effective target;
+        # patching the monitoring module would be a no-op.
+        monkeypatch.setattr(
+            "lumenos_sandbox.hyperv_client.test_guest_connectivity", _unavailable
+        )
+
+        monitor._check_network_activity()
+
+        assert "test_guest_connectivity" in monitor.telemetry_unavailable
+
+    def test_monitor_does_not_claim_a_breach_it_could_not_check(self, monkeypatch):
+        from lumenos_sandbox.exceptions import GuestTelemetryUnavailable
+
+        monitor = self._monitor()
+        monitor.set_vm_credentials("vm", "u", "p")
+
+        def _unavailable(*_args, **_kwargs):
+            raise GuestTelemetryUnavailable("test_guest_connectivity")
+
+        # Effective target: the symbol is imported from hyperv_client inside
+        # ``_check_network_activity`` (see the sibling test).
+        monkeypatch.setattr(
+            "lumenos_sandbox.hyperv_client.test_guest_connectivity", _unavailable
+        )
+
+        monitor._check_network_activity()
+
+        assert [e.event_type for e in monitor.events] == []
+
+    def test_a_missing_capability_forces_an_error_verdict(
+            self, sample_file, monkeypatch):
+        """End-to-end wiring: when the cycle finds telemetry missing, the
+        verdict is `error`, not a fabricated clean/suspicious."""
+        import lumenos_sandbox.inspect as inspect_mod
+
+        monkeypatch.setattr(
+            inspect_mod, "_telemetry_error",
+            lambda _bunker: "guest telemetry unavailable: test_guest_connectivity",
+        )
+
+        report = analyze_sync(sample_file, monitor_seconds=0)
+
+        assert report["verdict"] == "error"
+        assert "telemetry" in json.dumps(report["decontamination"]).lower()
+
+
+def test_analysis_degrades_to_error_but_still_runs_with_degraded_telemetry(
+        sample_file, monkeypatch):
+    """The whole point of the setup/observation split.
+
+    Observation is unavailable, so no verdict can be supported and the report
+    must say `error`. But the cycle itself must still run: the bunker is
+    created and the static scan happens, so the report still carries its IOCs.
+    """
+    from lumenos_sandbox.exceptions import GuestTelemetryUnavailable
+
+    def _unavailable(capability):
+        def _raise(*_args, **_kwargs):
+            raise GuestTelemetryUnavailable(capability)
+        return _raise
+
+    for capability in (
+        "test_guest_connectivity",
+        "get_guest_processes",
+        "read_guest_event_log",
+        "check_guest_vbs_status",
+    ):
+        monkeypatch.setattr(
+            f"lumenos_sandbox.hyperv_client.{capability}", _unavailable(capability)
+        )
+
+    report = analyze_sync(sample_file, monitor_seconds=1.0)
+
+    assert report["verdict"] == "error"
+    assert "iocs" in report
+    assert "telemetry" in json.dumps(report["decontamination"]).lower()

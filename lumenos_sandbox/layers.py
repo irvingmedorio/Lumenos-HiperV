@@ -93,13 +93,16 @@ class SecurityLayerBase(ABC):
             return False
 
     def verify(self) -> bool:
-        """Verify the security layer state."""
+        """Verify the security layer state.
+
+        A verification that could not run is not a pass. Swallowing the failure
+        and returning ``self.active`` reported an unverified layer as healthy,
+        so the exception is allowed to propagate: callers must not be able to
+        mistake "could not check" for "checked and fine".
+        """
         if not self._vm_name:
             return self.active
-        try:
-            return self._do_verify()
-        except Exception:
-            return self.active
+        return self._do_verify()
 
     def get_status(self) -> Dict[str, Any]:
         """Get status with base fields + subclass-specific details."""

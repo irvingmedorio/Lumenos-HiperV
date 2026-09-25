@@ -154,6 +154,9 @@ class SecurityMonitor:
         self.bunker_id = bunker_id
         self.events: List[SecurityEvent] = []
         self.escape_attempts: List[EscapeAttemptType] = []
+        # Guest capabilities that could not be consulted at all. Distinct from
+        # an empty result, which means "consulted and nothing found".
+        self.telemetry_unavailable: List[str] = []
         self._lock = threading.Lock()
         self._monitoring_active = False
         self._monitor_thread: Optional[threading.Thread] = None
@@ -228,7 +231,7 @@ class SecurityMonitor:
                 )
                 self.log_event(event)
         except Exception as e:
-            logger.debug("System integrity check failed: %s", e)
+            self._record_telemetry_unavailable("read_guest_event_log", e)
 
     def _check_network_activity(self):
         """Verifica actividad de red sospechosa (aislamiento del guest)."""
@@ -241,6 +244,8 @@ class SecurityMonitor:
             is_blocked = test_guest_connectivity(
                 self._vm_name, self._username, self._password,
             )
+            # Reaching the line below means the check actually ran; an unconsulted
+            # capability is recorded as unavailable instead of reading as "blocked".
             if not is_blocked:
                 event = SecurityEvent(
                     timestamp=datetime.now(),
@@ -252,7 +257,7 @@ class SecurityMonitor:
                 )
                 self.log_event(event)
         except Exception as e:
-            logger.debug("Network activity check failed: %s", e)
+            self._record_telemetry_unavailable("test_guest_connectivity", e)
 
     def _check_process_activity(self):
         """Verifica actividad de procesos sospechosos en el guest."""
@@ -286,7 +291,7 @@ class SecurityMonitor:
                     )
                     self.log_event(event)
         except Exception as e:
-            logger.debug("Process activity check failed: %s", e)
+            self._record_telemetry_unavailable("get_guest_processes", e)
 
     def _check_memory_integrity(self):
         """Verifica integridad de memoria (VBS/HVCI status) en el guest."""
@@ -321,7 +326,21 @@ class SecurityMonitor:
                 )
                 self.log_event(event)
         except Exception as e:
-            logger.debug("Memory integrity check failed: %s", e)
+            self._record_telemetry_unavailable("check_guest_vbs_status", e)
+
+    def _record_telemetry_unavailable(self, capability: str, exc: Exception) -> None:
+        """Record that a guest capability could not be consulted at all.
+
+        An empty result and an unconsulted capability are not the same thing:
+        the first means "nothing was found", the second means "nothing was
+        looked at". Recording the difference lets the verdict report an
+        infrastructure error instead of an all-clear this backend cannot
+        support.
+        """
+        with self._lock:
+            if capability not in self.telemetry_unavailable:
+                self.telemetry_unavailable.append(capability)
+        logger.warning("guest telemetry unavailable (%s): %s", capability, exc)
 
     def log_event(self, event: SecurityEvent):
         """Registra un evento de seguridad."""

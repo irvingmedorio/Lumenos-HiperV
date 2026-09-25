@@ -57,3 +57,21 @@ class SampleTooLarge(LumenosException):
             f"Sample is {size_bytes} bytes, over the "
             f"{limit_bytes}-byte limit (see MAX_SAMPLE_SIZE_MB)"
         )
+
+
+class GuestTelemetryUnavailable(LumenosException):
+    """Guest telemetry could not be collected, so its absence proves nothing.
+
+    Raised by a backend that cannot inspect the guest, instead of returning an
+    empty result: an empty list means "nothing was found", while this means
+    "nothing was looked at". Callers that would otherwise report an all-clear
+    must treat it as an infrastructure failure.
+    """
+
+    def __init__(self, capability: str, detail: str = ""):
+        self.capability = capability
+        self.detail = detail
+        super().__init__(
+            f"guest telemetry unavailable: {capability}"
+            + (f" ({detail})" if detail else "")
+        )

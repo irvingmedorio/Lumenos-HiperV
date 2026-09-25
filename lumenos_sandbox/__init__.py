@@ -59,6 +59,7 @@ from .exceptions import (
     DecontaminationFailure,
     IntegrityCheckFailure,
     BunkerNotReady,
+    GuestTelemetryUnavailable,
     SampleTooLarge,
 )
 
@@ -105,6 +106,7 @@ __all__ = [
     "DecontaminationFailure",
     "IntegrityCheckFailure",
     "BunkerNotReady",
+    "GuestTelemetryUnavailable",
     "SampleTooLarge",
     # Data Classes
     "BunkerConfig",

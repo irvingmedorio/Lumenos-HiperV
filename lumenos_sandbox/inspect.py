@@ -487,6 +487,24 @@ def _collect_iocs(bunker: Bunker, sample_path: Path) -> List[IOC]:
     return iocs
 
 
+def _telemetry_error(bunker: Optional[Bunker]) -> Optional[str]:
+    """Describe guest telemetry that could not be collected, or ``None``.
+
+    A capability that was never consulted looks, from the inside, exactly like
+    a guest that had nothing to report — so its silence used to become an
+    all-clear. Reporting it keeps the verdict honest when the backend cannot
+    actually look.
+    """
+    monitor = getattr(bunker, "security_monitor", None)
+    unavailable = getattr(monitor, "telemetry_unavailable", None)
+    if not unavailable:
+        return None
+    return (
+        "guest telemetry unavailable, no verdict can be supported: "
+        + ", ".join(sorted(set(unavailable)))
+    )
+
+
 def _decontaminate(bunker: Optional[Bunker]) -> Dict[str, Any]:
     """Destroy the bunker — ALWAYS called, even when the cycle failed.
 
@@ -665,6 +683,11 @@ def analyze_sync(
     finally:
         # 5. Decontaminate — ALWAYS, even on failure or deadline abort.
         decon = _decontaminate(bunker)
+
+    # A guest capability that was never consulted must not read as a clean
+    # guest. An error already recorded is more specific, so it wins.
+    if not error:
+        error = _telemetry_error(bunker)
 
     duration_ms = int((time.monotonic() - start) * 1000)
     return build_inspect_report(

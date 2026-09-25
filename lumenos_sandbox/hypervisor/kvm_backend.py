@@ -7,8 +7,9 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, NoReturn
 from .base import HypervisorBackend, BackendResult
+from ..exceptions import GuestTelemetryUnavailable
 logger = logging.getLogger("LUMENOS_SANDBOX.kvm")
 
 def _isolated_network_xml(switch_name: str) -> str:
@@ -36,6 +37,42 @@ def _isolated_network_xml(switch_name: str) -> str:
         f"<ip address='{subnet}' netmask='255.255.255.0'/>"
         f"</network>"
     )
+
+# ---------------------------------------------------------------------------
+# Guest telemetry is not implemented on this backend
+# ---------------------------------------------------------------------------
+#
+# These nine methods require guest tooling this backend does not drive. They
+# used to return True/[]/a hardcoded dict, which the monitor and the security
+# layers read as "the guest is isolated" and "no findings" — turning an
+# unconsulted capability into an all-clear this backend cannot support.
+#
+# The setup/observation split matters. SETUP (integration, firewall) must not
+# abort the cycle: refusing it would kill the bunker before any static analysis
+# ran, so it is logged and the cycle continues with degraded telemetry.
+# OBSERVATION (process list, event log, connectivity, VBS) fails loudly, because
+# no verdict can be supported without it and the cycle then reports an
+# infrastructure error instead of a fabricated clean/suspicious.
+#
+# Implementing them for real (libvirt + qemu-guest-agent) is separate work.
+
+def _warn_unsupported_setup(capability: str) -> bool:
+    """Log a guest setup step this backend cannot perform; report it as failed.
+
+    Returns False rather than True: the step did not happen, and claiming
+    success is exactly what made this backend untrustworthy. Callers carry on
+    with degraded telemetry instead of aborting the cycle.
+    """
+    logger.warning(
+        "guest setup not supported by KvmBackend (%s): continuing with "
+        "degraded telemetry", capability,
+    )
+    return False
+
+
+def _raise_unsupported(capability: str) -> NoReturn:
+    """Fail loudly for a KvmBackend guest observation that is not implemented."""
+    raise GuestTelemetryUnavailable(capability, "not implemented by KvmBackend")
 
 class KvmBackend(HypervisorBackend):
     def _run(self, cmd: List[str], timeout: int = 30):
@@ -141,7 +178,7 @@ class KvmBackend(HypervisorBackend):
         if not self.check_available():
             return BackendResult(False, "", "KVM not available")
         return BackendResult(True, "KVM available", "")
-    def enable_guest_integration(self, vm_name: str) -> bool: return True
+    def enable_guest_integration(self, vm_name: str) -> bool: return _warn_unsupported_setup("enable_guest_integration")
     def execute_in_guest(self, vm_name: str, username: str, password: str, command: str, timeout: int=30) -> BackendResult:
         # Try qemu-guest-agent guest-exec
         try:
@@ -171,11 +208,11 @@ class KvmBackend(HypervisorBackend):
                 except: pass
         except Exception as e: logger.debug("qemu-agent exec failed: %s", e)
         return BackendResult(False, "", "guest agent unavailable — fallback SSH not configured")
-    def configure_guest_firewall(self, vm_name: str, username: str, password: str, block_outbound=True, allow_dns=False) -> bool: return True
-    def test_guest_connectivity(self, vm_name: str, username: str, password: str, target="8.8.8.8") -> bool: return True
-    def get_guest_processes(self, vm_name: str, username: str, password: str) -> List[Dict]: return []
-    def kill_guest_process(self, vm_name: str, username: str, password: str, process_name: str) -> bool: return False
-    def check_guest_vbs_status(self, vm_name: str, username: str, password: str) -> Dict[str, bool]: return {"vbs_enabled": False, "hvci_enabled": False, "secure_boot": False, "kvm": True}
-    def read_guest_event_log(self, vm_name: str, username: str, password: str, log_name="Security", max_events=50) -> List[Dict]: return []
-    def check_guest_registry(self, vm_name: str, username: str, password: str, key_path: str) -> List[Dict]: return []
-    def install_sysmon_in_guest(self, vm_name: str, username: str, password: str, sysmon_path="C:\\Tools\\Sysmon64.exe") -> bool: return False
+    def configure_guest_firewall(self, vm_name: str, username: str, password: str, block_outbound=True, allow_dns=False) -> bool: return _warn_unsupported_setup("configure_guest_firewall")
+    def test_guest_connectivity(self, vm_name: str, username: str, password: str, target="8.8.8.8") -> bool: return _raise_unsupported("test_guest_connectivity")
+    def get_guest_processes(self, vm_name: str, username: str, password: str) -> List[Dict]: return _raise_unsupported("get_guest_processes")
+    def kill_guest_process(self, vm_name: str, username: str, password: str, process_name: str) -> bool: return _raise_unsupported("kill_guest_process")
+    def check_guest_vbs_status(self, vm_name: str, username: str, password: str) -> Dict[str, bool]: return _raise_unsupported("check_guest_vbs_status")
+    def read_guest_event_log(self, vm_name: str, username: str, password: str, log_name="Security", max_events=50) -> List[Dict]: return _raise_unsupported("read_guest_event_log")
+    def check_guest_registry(self, vm_name: str, username: str, password: str, key_path: str) -> List[Dict]: return _raise_unsupported("check_guest_registry")
+    def install_sysmon_in_guest(self, vm_name: str, username: str, password: str, sysmon_path="C:\\Tools\\Sysmon64.exe") -> bool: return _raise_unsupported("install_sysmon_in_guest")
