@@ -301,3 +301,76 @@ class TestHyperVClientIsInstantiableAndHonest:
         assert isinstance(backend, MockBackend)
         assert any("Hyper-V requested but not available" in r.getMessage()
                    for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+class _OkResultWith:
+    """A successful guest call whose stdout is fixed."""
+
+    def __init__(self, stdout):
+        self.success = True
+        self.stdout = stdout
+        self.stderr = ""
+
+
+class TestHonestTelemetryStructure:
+    """The shape of the contract, provable without a Windows host.
+
+    A reviewer cannot measure Windows behaviour from Linux, so these pin the
+    structure instead: the return types and the failure paths that
+    ``monitoring.py`` and ``layers.py`` actually consume.
+    """
+
+    def test_vbs_status_returns_every_key_its_callers_read(self, monkeypatch):
+        """``layers.py`` does ``status.get("vbs_enabled")`` and ``monitoring.py``
+        does ``vbs.get(...)``: the happy path must carry all three keys."""
+        client = _hyperv_client(
+            monkeypatch,
+            _OkResultWith('{"EnableVirtualizationBasedSecurity": 1, '
+                          '"RequirePlatformSecurityFeatures": 3}'),
+        )
+
+        status = client.check_guest_vbs_status("vm", "u", "p")
+
+        assert sorted(status) == ["hvci_enabled", "secure_boot", "vbs_enabled"]
+        assert status.get("vbs_enabled") is True
+        assert status.get("secure_boot") is True
+        assert status.get("hvci_enabled") is True
+
+    def test_vbs_status_raises_when_the_second_probe_fails(self, monkeypatch):
+        """The DeviceGuard probe can succeed while the Secure Boot probe does
+        not. A half-consulted capability is still not a verified one, and this
+        is the branch the single-result stub cannot reach."""
+        from lumenos_sandbox.exceptions import GuestTelemetryUnavailable
+
+        client = _hyperv_client(monkeypatch, _FailedResult())
+        results = iter([
+            _OkResultWith('{"EnableVirtualizationBasedSecurity": 1}'),
+            _FailedResult(),
+        ])
+        monkeypatch.setattr(client, "execute_in_guest", lambda *_a, **_k: next(results))
+
+        with pytest.raises(GuestTelemetryUnavailable) as excinfo:
+            client.check_guest_vbs_status("vm", "u", "p")
+
+        assert excinfo.value.capability == "check_guest_vbs_status"
+
+    def test_list_methods_return_a_real_list_on_success(self, monkeypatch):
+        """``layers.py`` and ``monitoring.py`` branch on emptiness
+        (``if not processes``, ``if not events``, ``if entries``), so the
+        success path must be a list and never the raw parsed payload."""
+        client = _hyperv_client(monkeypatch, _OkResultWith('[{"Id": 1}]'))
+
+        assert isinstance(client.get_guest_processes("vm", "u", "p"), list)
+        assert isinstance(client.read_guest_event_log("vm", "u", "p"), list)
+        assert isinstance(
+            client.check_guest_registry("vm", "u", "p", "HKLM\\Software"), list
+        )
+
+    def test_connectivity_keeps_its_inverted_contract(self, monkeypatch):
+        """``monitoring.py`` reads True as blocked/good and False as a breach,
+        so the success path must keep returning that inverted bool."""
+        blocked = _hyperv_client(monkeypatch, _OkResultWith("TcpTestSucceeded false"))
+        assert blocked.test_guest_connectivity("vm", "u", "p") is True
+
+        reachable = _hyperv_client(monkeypatch, _OkResultWith("TcpTestSucceeded True"))
+        assert reachable.test_guest_connectivity("vm", "u", "p") is False
