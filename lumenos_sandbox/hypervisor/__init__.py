@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Hypervisor factory — Strategy selection for Hyper-V / KVM / Mock."""
 import os
+import logging
 from typing import Optional
 from .base import HypervisorBackend
 _backend: Optional[HypervisorBackend] = None
+logger = logging.getLogger("LUMENOS_SANDBOX.hypervisor")
 def get_backend() -> HypervisorBackend:
     global _backend
     env = os.getenv("LUMENOS_HYPERVISOR", "").lower()
@@ -14,11 +16,21 @@ def get_backend() -> HypervisorBackend:
             _backend = MockBackend()
         return _backend
     if env == "hyperv":
-        if _backend is None or _backend.__class__.__name__ != "HyperVBackend":
-            try:
-                from .hyperv_backend import HyperVBackend
-                _backend = HyperVBackend()
-            except Exception:
+        # The concrete class is HyperVClient (HyperVBackend is an alias), so the
+        # cache guard must compare against the real name or the singleton never
+        # caches.
+        if _backend is None or _backend.__class__.__name__ != "HyperVClient":
+            from .hyperv_backend import HyperVBackend
+            _backend = HyperVBackend()
+            # Gate on an explicit capability probe instead of swallowing a
+            # construction error: the old `except Exception` hid the fact that
+            # this class could not be instantiated at all, so Windows silently
+            # ran on MockBackend while claiming Hyper-V.
+            if not _backend.check_available():
+                logger.warning(
+                    "Hyper-V requested but not available on this host — "
+                    "degrading to MockBackend"
+                )
                 from .mock_backend import MockBackend
                 _backend = MockBackend()
         return _backend
@@ -32,12 +44,18 @@ def get_backend() -> HypervisorBackend:
         return _backend
     import sys
     if sys.platform == "win32":
-        try:
-            from .hyperv_backend import HyperVBackend
-            _backend = HyperVBackend()
-        except Exception:
-            from .mock_backend import MockBackend
-            _backend = MockBackend()
+        from .hyperv_backend import HyperVBackend
+        _backend = HyperVBackend()
+        # Same explicit probe as the env branch: no silent construction-failure
+        # fallback. Mirror of the Linux branch below, which already gates on
+        # check_available().
+        if _backend.check_available():
+            return _backend
+        logger.warning(
+            "Hyper-V not available on this host — degrading to MockBackend"
+        )
+        from .mock_backend import MockBackend
+        _backend = MockBackend()
         return _backend
     from ..platform import has_kvm, has_libvirt, has_qemu
     try:

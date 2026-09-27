@@ -184,3 +184,120 @@ class TestKvmGuestTelemetryIsHonest:
         m = MockBackend()
         for name, args in KVM_UNSUPPORTED_OBSERVATION_CALLS + KVM_DEGRADED_SETUP_CALLS:
             getattr(m, name)(*args)
+
+
+# ---------------------------------------------------------------------------
+# Hyper-V backend: instantiable, and honest about what it could not consult
+# ---------------------------------------------------------------------------
+
+class _FailedResult:
+    """Stand-in for the backend's result object, in the failed state."""
+
+    success = False
+    stdout = ""
+    stderr = "guest agent unavailable"
+
+
+def _hyperv_client(monkeypatch, result):
+    """A HyperVClient whose guest calls return *result* without touching a host."""
+    from lumenos_sandbox.hypervisor.hyperv_backend import HyperVClient
+
+    client = HyperVClient()
+    monkeypatch.setattr(
+        client, "execute_in_guest", lambda *_a, **_k: result
+    )
+    return client
+
+
+HYPERV_OBSERVATION_CALLS = [
+    ("test_guest_connectivity", ("vm", "u", "p")),
+    ("get_guest_processes", ("vm", "u", "p")),
+    ("read_guest_event_log", ("vm", "u", "p")),
+    ("check_guest_registry", ("vm", "u", "p", "HKLM\\Software")),
+    ("check_guest_vbs_status", ("vm", "u", "p")),
+]
+
+
+class TestHyperVClientIsInstantiableAndHonest:
+    """HyperVClient must satisfy the ABC and must not fabricate an all-clear."""
+
+    def test_instantiable_and_satisfies_the_abc(self):
+        from lumenos_sandbox.hypervisor.hyperv_backend import HyperVClient
+
+        assert not HyperVClient.__abstractmethods__
+        HyperVClient()
+
+    def test_check_available_delegates_to_the_historical_probe(self, monkeypatch):
+        from lumenos_sandbox.hypervisor.hyperv_backend import HyperVClient
+
+        client = HyperVClient()
+        monkeypatch.setattr(client, "check_hyper_v_available", lambda: True)
+        assert client.check_available() is True
+
+        monkeypatch.setattr(client, "check_hyper_v_available", lambda: False)
+        assert client.check_available() is False
+
+    @pytest.mark.parametrize(
+        "name,args",
+        HYPERV_OBSERVATION_CALLS,
+        ids=[name for name, _ in HYPERV_OBSERVATION_CALLS],
+    )
+    def test_an_unconsulted_capability_raises_instead_of_fabricating(
+            self, name, args, monkeypatch):
+        """A consult that did not run is not an empty result, and it is
+        certainly not 'isolated' or 'no findings'."""
+        from lumenos_sandbox.exceptions import GuestTelemetryUnavailable
+
+        client = _hyperv_client(monkeypatch, _FailedResult())
+
+        with pytest.raises(GuestTelemetryUnavailable) as excinfo:
+            getattr(client, name)(*args)
+
+        assert excinfo.value.capability == name
+
+    def test_check_guest_vbs_status_returns_a_dict_on_partial_data(self, monkeypatch):
+        """The regression that mattered: this method used to reassign its result
+        dict to a frozen dataclass, raise TypeError on item assignment, and then
+        return the dataclass while every caller called .get() on it."""
+        class _OkResult:
+            success = True
+            stdout = '{"EnableVirtualizationBasedSecurity": 1, "RequirePlatformSecurityFeatures": 1}'
+            stderr = ""
+
+        client = _hyperv_client(monkeypatch, _OkResult())
+        status = client.check_guest_vbs_status("vm", "u", "p")
+
+        assert isinstance(status, dict)
+        assert status["vbs_enabled"] is True
+        assert status["secure_boot"] is True
+        assert status.get("hvci_enabled") is False
+
+    def test_get_backend_uses_hyperv_when_available(self, monkeypatch):
+        """The regression: a broad `except Exception` hid that the class could
+        not be instantiated, so Windows silently ran on MockBackend."""
+        import lumenos_sandbox.hypervisor as hv
+        from lumenos_sandbox.hypervisor.hyperv_backend import HyperVClient
+
+        monkeypatch.setenv("LUMENOS_HYPERVISOR", "hyperv")
+        hv.reset_backend()
+        monkeypatch.setattr(HyperVClient, "check_available", lambda self: True)
+
+        assert isinstance(hv.get_backend(), HyperVClient)
+
+    def test_get_backend_warns_when_it_degrades_to_mock(self, monkeypatch, caplog):
+        import logging
+
+        import lumenos_sandbox.hypervisor as hv
+        from lumenos_sandbox.hypervisor.hyperv_backend import HyperVClient
+        from lumenos_sandbox.hypervisor.mock_backend import MockBackend
+
+        monkeypatch.setenv("LUMENOS_HYPERVISOR", "hyperv")
+        hv.reset_backend()
+        monkeypatch.setattr(HyperVClient, "check_available", lambda self: False)
+
+        with caplog.at_level(logging.WARNING, logger="LUMENOS_SANDBOX.hypervisor"):
+            backend = hv.get_backend()
+
+        assert isinstance(backend, MockBackend)
+        assert any("Hyper-V requested but not available" in r.getMessage()
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]

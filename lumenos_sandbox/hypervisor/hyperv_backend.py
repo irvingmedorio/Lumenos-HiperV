@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
 from .base import HypervisorBackend, BackendResult
+from ..exceptions import GuestTelemetryUnavailable
 logger = logging.getLogger("LUMENOS_SANDBOX.hyperv_client")
 
 
@@ -109,6 +110,15 @@ class HyperVClient(HypervisorBackend):
         )
         result = self._run_ps(cmd, timeout=15)
         return result.success and "Enabled" in result.stdout
+
+    def check_available(self) -> bool:
+        """ABC entry point for Hyper-V availability (delegates to the probe).
+
+        ``check_hyper_v_available`` keeps its historical name: it is called from
+        production (``hyperv_backend.py:47,301,555``) and patched by roughly
+        twenty test targets, so renaming it would be a wide, pointless change.
+        """
+        return self.check_hyper_v_available()
 
     # -----------------------------------------------------------------------
     # VM status / info
@@ -415,8 +425,11 @@ class HyperVClient(HypervisorBackend):
         )
         result = self.execute_in_guest(vm_name, username, password, conn_cmd, timeout=20)
         if not result.success:
-            # Guest unreachable = isolation works
-            return True
+            # A probe that did not run proves nothing. Returning True here meant
+            # "blocked = good", so a broken consult reported verified isolation.
+            raise GuestTelemetryUnavailable(
+                "test_guest_connectivity", result.stderr or result.stdout or "no output"
+            )
         # TcpTestSucceeded=True means connectivity exists → isolation failed
         if "True" in result.stdout:
             logger.warning("Guest can reach %s — isolation broken", target)
@@ -431,14 +444,20 @@ class HyperVClient(HypervisorBackend):
         )
         result = self.execute_in_guest(vm_name, username, password, cmd, timeout=15)
         if not result.success:
-            return []
+            # An empty list reads as "no suspicious processes"; a failed consult
+            # is not the same thing and must not become an all-clear.
+            raise GuestTelemetryUnavailable(
+                "get_guest_processes", result.stderr or result.stdout or "no output"
+            )
         try:
             data = json.loads(result.stdout)
-            if isinstance(data, dict):
-                return [data]
-            return data
-        except (json.JSONDecodeError, TypeError):
-            return []
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise GuestTelemetryUnavailable(
+                "get_guest_processes", f"unparsable output: {exc}"
+            ) from exc
+        if isinstance(data, dict):
+            return [data]
+        return data
 
     def kill_guest_process(self, vm_name: str, username: str, password: str,
                            process_name: str) -> bool:
@@ -452,32 +471,43 @@ class HyperVClient(HypervisorBackend):
 
         Returns dict with keys: vbs_enabled, hvci_enabled, secure_boot.
         """
-        result = {"vbs_enabled": False, "hvci_enabled": False, "secure_boot": False}
+        status = {"vbs_enabled": False, "hvci_enabled": False, "secure_boot": False}
 
-        # Check DeviceGuard registry keys
+        # Check DeviceGuard registry keys. A consult that did not run proves
+        # nothing, so it raises instead of returning a fabricated all-clear.
         dg_cmd = (
             "Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard' "
             "-ErrorAction SilentlyContinue | ConvertTo-Json -Compress"
         )
-        result = self.execute_in_guest(vm_name, username, password, dg_cmd, timeout=10)
-        if result.success and result.stdout:
+        dg_result = self.execute_in_guest(vm_name, username, password, dg_cmd, timeout=10)
+        if not dg_result.success:
+            raise GuestTelemetryUnavailable(
+                "check_guest_vbs_status", dg_result.stderr or dg_result.stdout or "no output"
+            )
+        if dg_result.stdout:
             try:
-                dg = json.loads(result.stdout)
-                result["vbs_enabled"] = bool(dg.get("EnableVirtualizationBasedSecurity", 0))
+                dg = json.loads(dg_result.stdout)
+                status["vbs_enabled"] = bool(dg.get("EnableVirtualizationBasedSecurity", 0))
                 # RequirePlatformSecurityFeatures: bit 1 = Secure Boot, bit 2 = HVCI
                 features = int(dg.get("RequirePlatformSecurityFeatures", 0))
-                result["secure_boot"] = bool(features & 1)
-                result["hvci_enabled"] = bool(features & 2)
-            except (json.JSONDecodeError, TypeError):
+                status["secure_boot"] = bool(features & 1)
+                status["hvci_enabled"] = bool(features & 2)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                # Partial data still yields the other keys; nothing is fabricated
+                # into a positive, so this is not an all-clear.
                 pass
 
         # Also check Secure Boot via UEFI
         sb_cmd = "Confirm-SecureBootUEFI -ErrorAction SilentlyContinue"
-        result = self.execute_in_guest(vm_name, username, password, sb_cmd, timeout=10)
-        if result.success and "True" in result.stdout:
-            result["secure_boot"] = True
+        sb_result = self.execute_in_guest(vm_name, username, password, sb_cmd, timeout=10)
+        if not sb_result.success:
+            raise GuestTelemetryUnavailable(
+                "check_guest_vbs_status", sb_result.stderr or sb_result.stdout or "no output"
+            )
+        if "True" in sb_result.stdout:
+            status["secure_boot"] = True
 
-        return result
+        return status
 
     def read_guest_event_log(self, vm_name: str, username: str, password: str,
                              log_name: str = "Security", max_events: int = 50) -> List[Dict]:
@@ -490,14 +520,20 @@ class HyperVClient(HypervisorBackend):
         )
         result = self.execute_in_guest(vm_name, username, password, cmd, timeout=30)
         if not result.success:
-            return []
+            # An empty list reads as "no security events"; a failed consult is
+            # not the same thing and must not become an all-clear.
+            raise GuestTelemetryUnavailable(
+                "read_guest_event_log", result.stderr or result.stdout or "no output"
+            )
         try:
             data = json.loads(result.stdout)
-            if isinstance(data, dict):
-                return [data]
-            return data
-        except (json.JSONDecodeError, TypeError):
-            return []
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise GuestTelemetryUnavailable(
+                "read_guest_event_log", f"unparsable output: {exc}"
+            ) from exc
+        if isinstance(data, dict):
+            return [data]
+        return data
 
     def check_guest_registry(self, vm_name: str, username: str, password: str,
                              key_path: str) -> List[Dict]:
@@ -508,14 +544,20 @@ class HyperVClient(HypervisorBackend):
         )
         result = self.execute_in_guest(vm_name, username, password, cmd, timeout=10)
         if not result.success:
-            return []
+            # An empty list reads as "no persistence"; a failed consult is not
+            # the same thing and must not become an all-clear.
+            raise GuestTelemetryUnavailable(
+                "check_guest_registry", result.stderr or result.stdout or "no output"
+            )
         try:
             data = json.loads(result.stdout)
-            if isinstance(data, dict):
-                return [data]
-            return data
-        except (json.JSONDecodeError, TypeError):
-            return []
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise GuestTelemetryUnavailable(
+                "check_guest_registry", f"unparsable output: {exc}"
+            ) from exc
+        if isinstance(data, dict):
+            return [data]
+        return data
 
     def install_sysmon_in_guest(self, vm_name: str, username: str, password: str,
                                 sysmon_path: str = "C:\\Tools\\Sysmon64.exe") -> bool:
