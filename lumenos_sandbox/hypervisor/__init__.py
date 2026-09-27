@@ -25,8 +25,18 @@ def get_backend() -> HypervisorBackend:
             # Gate on an explicit capability probe instead of swallowing a
             # construction error: the old `except Exception` hid the fact that
             # this class could not be instantiated at all, so Windows silently
-            # ran on MockBackend while claiming Hyper-V.
-            if not _backend.check_available():
+            # ran on MockBackend while claiming Hyper-V. The probe is guarded in
+            # turn, so a raising probe degrades the factory instead of crashing
+            # it — the failure-tolerant behaviour the old swallow provided.
+            try:
+                available = _backend.check_available()
+            except Exception as exc:
+                logger.warning(
+                    "Hyper-V availability probe raised (%s) — degrading to "
+                    "MockBackend", exc,
+                )
+                available = False
+            if not available:
                 logger.warning(
                     "Hyper-V requested but not available on this host — "
                     "degrading to MockBackend"
@@ -47,9 +57,17 @@ def get_backend() -> HypervisorBackend:
         from .hyperv_backend import HyperVBackend
         _backend = HyperVBackend()
         # Same explicit probe as the env branch: no silent construction-failure
-        # fallback. Mirror of the Linux branch below, which already gates on
-        # check_available().
-        if _backend.check_available():
+        # fallback, and the probe is guarded so a raising probe degrades instead
+        # of crashing the factory. Mirror of the Linux branch below.
+        try:
+            available = _backend.check_available()
+        except Exception as exc:
+            logger.warning(
+                "Hyper-V availability probe raised (%s) — degrading to "
+                "MockBackend", exc,
+            )
+            available = False
+        if available:
             return _backend
         logger.warning(
             "Hyper-V not available on this host — degrading to MockBackend"
